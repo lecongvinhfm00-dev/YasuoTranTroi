@@ -4,9 +4,14 @@ export type NavigationModule =
   | 'video'
   | 'literature'
   | 'ai'
+  | 'reader'
   | 'playlist'
+  | 'notes'
+  | 'history'
   | 'presentation'
   | 'settings';
+
+export type SyncStatusState = 'syncing' | 'synced' | 'error' | 'local';
 
 export type LiteratureCategory =
   | 'Thơ'
@@ -78,6 +83,53 @@ export interface LiteratureDocument {
   updatedAt: string;
 }
 
+export type AIMode = AIModeId;
+
+export interface PersonalNoteItem {
+  id: string;
+  title: string;
+  documentId?: string;
+  documentTitle?: string;
+  content: string;
+  tags: string[];
+  isFavorite?: boolean;
+  updatedAt: string;
+}
+
+export interface ReadingHistoryItem {
+  id: string;
+  documentId: string;
+  documentTitle: string;
+  author: string;
+  segmentIndex: number;
+  totalSegments: number;
+  progressPercent: number;
+  updatedAt: string;
+  timestamp?: string;
+}
+
+export interface TTSSettingsConfig {
+  uiLanguage?: 'vi';
+  readingLanguage?: 'vi-VN';
+  voiceURI: string;
+  rate: number;
+  pitch: number;
+  volume: number;
+  autoNextSegment: boolean;
+  autoAdvance?: boolean;
+  autoScroll: boolean;
+  highlightActive: boolean;
+  highlightCurrentSegment?: boolean;
+  fontSize: 'sm' | 'base' | 'lg' | 'xl';
+  fontSizePx?: number;
+}
+
+export interface StudioSettings {
+  theme: 'dark' | 'light';
+  language: 'vi' | 'en';
+  startupModule: NavigationModule;
+}
+
 export interface PlaylistItem {
   id: string;
   name: string;
@@ -110,7 +162,7 @@ export interface PresentationDeck {
 
 export interface DuckingConfig {
   enabled: boolean;
-  duckingLevelPercent: number; // e.g., 20 means reduce to 20% of current volume
+  duckingLevelPercent: number;
   fadeDurationMs: number;
   restoreDurationMs: number;
 }
@@ -146,4 +198,5 @@ export interface UserProfile {
   role: 'guest' | 'user' | 'admin';
   dailyQuota: number;
   isAuthenticated: boolean;
+  authProvider?: 'supabase_anonymous' | 'cloud_anonymous' | 'google';
 }

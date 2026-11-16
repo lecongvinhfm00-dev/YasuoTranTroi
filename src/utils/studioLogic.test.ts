@@ -5,9 +5,13 @@ import {
   evaluateQuotaState,
   analyzeLiteraryMetrics,
   parseMarkdownToSlides,
+  splitTextIntoSegments,
+  findSegmentIndexAtOffset,
   synthesizeWavBytes,
   formatBytes,
   formatDuration,
+  validateSessionUserUuid,
+  resolveAnonymousPermissions,
 } from './studioLogic';
 
 test('calculateDuckedVolume reduces volume accurately when ducking is active', () => {
@@ -37,6 +41,19 @@ test('analyzeLiteraryMetrics counts words, stanzas, and lines in Vietnamese poet
   assert.equal(metrics.wordCount, 28);
 });
 
+test('splitTextIntoSegments and findSegmentIndexAtOffset segment Vietnamese poetry and map cursor offsets', () => {
+  const text = `# Cảnh ngày xuân\n\nNgày xuân con én đưa thoi,\nThiều quang chín chục đã ngoài sáu mươi.\n\nCỏ non xanh tận chân trời,\nCành lê trắng điểm một vài bông hoa.`;
+  const segments = splitTextIntoSegments(text);
+  assert.equal(segments.length, 3);
+  assert.equal(segments[0].isHeading, true);
+  assert.equal(segments[0].text, 'Cảnh ngày xuân');
+  assert.ok(segments[1].text.includes('Ngày xuân con én đưa thoi'));
+  assert.ok(segments[2].text.includes('Cỏ non xanh tận chân trời'));
+
+  const offsetInThird = text.indexOf('Cành lê trắng điểm');
+  assert.equal(findSegmentIndexAtOffset(segments, offsetInThird), 2);
+});
+
 test('parseMarkdownToSlides transforms markdown headings and quotes into slide objects', () => {
   const md = `## Mở đầu: Hoàn cảnh sáng tác Tây Tiến\n- Sáng tác năm 1948 tại Phù Lưu Chanh\n- In trong tập Mây đầu ô\nGhi chú: Nhấn mạnh nỗi nhớ da diết của Quang Dũng.\n\n## Vẻ đẹp thiên nhiên miền Tây\n> Sông Mã xa rồi Tây Tiến ơi\n- Hùng vĩ, dữ dội nhưng thơ mộng`;
   const slides = parseMarkdownToSlides(md, 'Tây Tiến');
@@ -61,3 +78,29 @@ test('formatBytes and formatDuration format numbers cleanly', () => {
   assert.equal(formatBytes(1536), '1.5 KB');
   assert.equal(formatDuration(125), '02:05');
 });
+
+test('validateSessionUserUuid and resolveAnonymousPermissions enforce UUID v4 and prevent anonymous role escalation', () => {
+  const validUuid = 'f47ac10b-58cc-4372-a567-0e02b2c3d479';
+  assert.equal(validateSessionUserUuid(validUuid), true);
+  assert.equal(validateSessionUserUuid('not-a-uuid'), false);
+
+  // Anonymous account trying to escalate to admin or teacher is strictly locked to user
+  const anonAttemptAdmin = resolveAnonymousPermissions({
+    sessionUserId: validUuid,
+    isAnonymous: true,
+    requestedRole: 'admin',
+  });
+  assert.equal(anonAttemptAdmin.validUuid, true);
+  assert.equal(anonAttemptAdmin.role, 'user');
+  assert.equal(anonAttemptAdmin.canAccessAdmin, false);
+  assert.equal(anonAttemptAdmin.canAccessTeacher, false);
+
+  const anonAttemptTeacher = resolveAnonymousPermissions({
+    sessionUserId: validUuid,
+    isAnonymous: true,
+    requestedRole: 'teacher',
+  });
+  assert.equal(anonAttemptTeacher.role, 'user');
+  assert.equal(anonAttemptTeacher.canAccessTeacher, false);
+});
+

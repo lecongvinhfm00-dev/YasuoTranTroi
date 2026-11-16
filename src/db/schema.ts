@@ -65,6 +65,20 @@ export const userSettings = pgTable('user_settings', {
   updatedAt: timestamp('updated_at').defaultNow(),
 });
 
+export const userWorkspaceSync = pgTable('user_workspace_sync', {
+  userId: text('user_id')
+    .primaryKey()
+    .references(() => profiles.uid),
+  lastDocumentId: text('last_document_id').default('doc-truyen-kieu').notNull(),
+  lastSegmentIndex: integer('last_segment_index').default(0).notNull(),
+  ttsSettingsJson: text('tts_settings_json').default('{}').notNull(),
+  personalNotesJson: text('personal_notes_json').default('[]').notNull(),
+  readingHistoryJson: text('reading_history_json').default('[]').notNull(),
+  favoritesJson: text('favorites_json').default('[]').notNull(),
+  savedDocumentsJson: text('saved_documents_json').default('[]').notNull(),
+  updatedAt: timestamp('updated_at').defaultNow(),
+});
+
 export const profilesRelations = relations(profiles, ({ many, one }) => ({
   conversations: many(conversations),
   aiUsage: many(aiUsageDaily),

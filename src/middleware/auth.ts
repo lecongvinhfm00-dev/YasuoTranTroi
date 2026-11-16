@@ -32,10 +32,48 @@ export const resolveUserSession = async (
   if (authHeader && authHeader.startsWith('Bearer ')) {
     const token = authHeader.split('Bearer ')[1].trim();
     if (token && token !== 'null' && token !== 'undefined') {
+      // 1. Hỗ trợ phiên tài khoản ẩn danh tự động (anon_tok_<uid>)
+      if (token.startsWith('anon_tok_')) {
+        const rawAnonUid = token
+          .slice('anon_tok_'.length)
+          .replace(/[^a-zA-Z0-9_-]/g, '')
+          .slice(0, 64);
+        const uid = rawAnonUid || 'anon_default_user';
+        try {
+          const profile = await getOrCreateProfile({
+            uid,
+            email: `${uid}@anonymous.literature.studio`,
+            username: `Độc giả #${uid.slice(-6).toUpperCase()}`,
+            role: 'user',
+          });
+          req.userContext = {
+            uid: profile.uid,
+            email: profile.email,
+            username: profile.username,
+            role: 'user',
+            dailyQuota: profile.dailyQuota,
+            isAuthenticated: true,
+          };
+          return next();
+        } catch (err) {
+          console.error('Anonymous token profile resolution error:', err);
+          req.userContext = {
+            uid,
+            email: `${uid}@anonymous.literature.studio`,
+            username: `Độc giả #${uid.slice(-6).toUpperCase()}`,
+            role: 'user',
+            dailyQuota: 15,
+            isAuthenticated: true,
+          };
+          return next();
+        }
+      }
+
+      // 2. Hỗ trợ Firebase ID Token hoặc JWT (Supabase Anonymous JWT)
       try {
         const decoded = await adminAuth.verifyIdToken(token);
         const email = decoded.email || `${decoded.uid}@user.literature.studio`;
-        const username = decoded.name || email.split('@')[0] || 'Học viên Văn học';
+        const username = decoded.name || email.split('@')[0] || 'Độc giả Văn học';
         const profile = await getOrCreateProfile({
           uid: decoded.uid,
           email,
@@ -53,48 +91,74 @@ export const resolveUserSession = async (
           isAuthenticated: true,
         };
         return next();
-      } catch (error) {
-        console.error('Error verifying Firebase ID token:', error);
-        return res.status(401).json({
-          error: 'Phiên đăng nhập không hợp lệ hoặc đã hết hạn. Vui lòng đăng nhập lại.',
-        });
+      } catch {
+        // Giải mã payload JWT của Supabase Anonymous Auth (lấy UUID từ payload.sub / session.user.id)
+        try {
+          const parts = token.split('.');
+          if (parts.length === 3) {
+            const payloadRaw = Buffer.from(parts[1], 'base64url').toString('utf8');
+            const payload = JSON.parse(payloadRaw);
+            if (payload && typeof payload.sub === 'string' && payload.sub.length > 5) {
+              const supaUuid = payload.sub.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64);
+              const profile = await getOrCreateProfile({
+                uid: supaUuid,
+                email: `${supaUuid}@supabase.literature.studio`,
+                username: `Độc giả #${supaUuid.slice(-6).toUpperCase()}`,
+                role: 'user',
+              });
+              req.userContext = {
+                uid: profile.uid,
+                email: profile.email,
+                username: profile.username,
+                // Yêu cầu 9: Không cấp quyền Admin hoặc Teacher cho tài khoản ẩn danh
+                role: 'user',
+                dailyQuota: profile.dailyQuota,
+                isAuthenticated: true,
+              };
+              return next();
+            }
+          }
+        } catch {
+          // Tiếp tục xuống fallback ẩn danh bên dưới
+        }
       }
     }
   }
 
-  // Fallback to a sandboxed guest session so the app works immediately before Google Sign-In
-  const rawGuestId = String(req.headers['x-studio-guest-id'] || 'guest-default')
+  // 3. Fallback phiên ẩn danh theo header x-studio-guest-id
+  const rawGuestId = String(req.headers['x-studio-guest-id'] || 'anon-default')
     .replace(/[^a-zA-Z0-9_-]/g, '')
     .slice(0, 48);
-  const guestUid = `guest_${rawGuestId || 'studio'}`;
+  const guestUid = rawGuestId.startsWith('anon') ? rawGuestId : `anon_${rawGuestId || 'studio'}`;
 
   try {
     const profile = await getOrCreateProfile({
       uid: guestUid,
-      email: `${guestUid}@guest.literature.studio`,
-      username: 'Khách trải nghiệm',
-      role: 'guest',
+      email: `${guestUid}@anonymous.literature.studio`,
+      username: `Độc giả #${guestUid.slice(-6).toUpperCase()}`,
+      role: 'user',
     });
 
     req.userContext = {
       uid: profile.uid,
       email: profile.email,
       username: profile.username,
-      role: 'guest',
+      role: 'user',
       dailyQuota: profile.dailyQuota,
-      isAuthenticated: false,
+      isAuthenticated: true,
     };
     return next();
   } catch (error) {
     console.error('Fallback session resolution error:', error);
     req.userContext = {
       uid: guestUid,
-      email: `${guestUid}@guest.literature.studio`,
-      username: 'Khách trải nghiệm',
-      role: 'guest',
+      email: `${guestUid}@anonymous.literature.studio`,
+      username: `Độc giả #${guestUid.slice(-6).toUpperCase()}`,
+      role: 'user',
       dailyQuota: 15,
-      isAuthenticated: false,
+      isAuthenticated: true,
     };
     return next();
   }
 };
+

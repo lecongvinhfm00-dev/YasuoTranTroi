@@ -61,7 +61,7 @@ const AI_MODES: { id: AIModeId; label: string; desc: string; samplePrompt: strin
   },
   {
     id: 'presentation_assistant',
-    label: 'F. Presentation Assistant',
+    label: 'F. Hỗ trợ soạn thuyết trình',
     desc: 'Tạo nội dung slide, lời dẫn thuyết trình và câu hỏi tương tác',
     samplePrompt:
       'Soạn cấu trúc 4 slide thuyết trình kèm lời dẫn về bi kịch tinh thần trong vở kịch Hồn Trương Ba, da hàng thịt của Lưu Quang Vũ.',
@@ -449,7 +449,7 @@ export const AIAssistantView: React.FC<AIAssistantViewProps> = ({
                   className="flex items-center gap-1 rounded-lg bg-[var(--bg-surface)] px-2.5 py-1 text-xs font-medium text-[var(--text-main)] hover:bg-[#8275F5] hover:text-white transition-colors"
                 >
                   <Download className="h-3.5 w-3.5" />
-                  <span>Export .MD</span>
+                  <span>Xuất tệp .MD</span>
                 </button>
               )}
             </div>
@@ -493,11 +493,11 @@ export const AIAssistantView: React.FC<AIAssistantViewProps> = ({
                         <button
                           type="button"
                           onClick={() => masterAudioEngine.speakText(msg.content)}
-                          aria-label="Đọc câu trả lời bằng TTS"
+                          aria-label="Đọc câu trả lời bằng giọng đọc"
                           className="flex items-center gap-1 hover:text-[#E9C878]"
                         >
                           <Volume2 className="h-3.5 w-3.5" />
-                          <span>Đọc TTS</span>
+                          <span>Nghe đọc</span>
                         </button>
 
                         <button
@@ -527,7 +527,7 @@ export const AIAssistantView: React.FC<AIAssistantViewProps> = ({
                           ) : (
                             <Copy className="h-3.5 w-3.5" />
                           )}
-                          <span>Copy</span>
+                          <span>Sao chép</span>
                         </button>
                       </div>
                     )}
@@ -589,7 +589,7 @@ export const AIAssistantView: React.FC<AIAssistantViewProps> = ({
                     className="flex items-center gap-1 rounded-lg bg-[var(--bg-surface)] px-3 py-1.5 text-xs font-medium text-[var(--text-muted)] hover:text-[var(--text-main)]"
                   >
                     <RotateCcw className="h-3.5 w-3.5" />
-                    <span>Tạo lại (Regenerate)</span>
+                    <span>Tạo lại phản hồi</span>
                   </button>
                 )}
               </div>

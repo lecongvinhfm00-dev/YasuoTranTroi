@@ -7,6 +7,7 @@ import {
   playlists,
   profiles,
   userSettings,
+  userWorkspaceSync,
 } from './schema.ts';
 
 export async function checkDatabaseReady(): Promise<boolean> {
@@ -293,3 +294,69 @@ export async function upsertUserSettingsRecord(params: {
     throw new Error('Không thể lưu cài đặt người dùng.', { cause: error });
   }
 }
+
+export async function getUserWorkspaceSyncRecord(uid: string) {
+  try {
+    const rows = await db
+      .select()
+      .from(userWorkspaceSync)
+      .where(eq(userWorkspaceSync.userId, uid))
+      .limit(1);
+    return rows[0] ?? null;
+  } catch (error) {
+    console.error('Database query failed in getUserWorkspaceSyncRecord:', error);
+    throw new Error('Không thể tải dữ liệu đồng bộ cá nhân.', { cause: error });
+  }
+}
+
+export async function upsertUserWorkspaceSyncRecord(params: {
+  uid: string;
+  lastDocumentId?: string;
+  lastSegmentIndex?: number;
+  ttsSettingsJson?: string;
+  personalNotesJson?: string;
+  readingHistoryJson?: string;
+  favoritesJson?: string;
+  savedDocumentsJson?: string;
+}) {
+  try {
+    const existing = await getUserWorkspaceSyncRecord(params.uid);
+    const nextValues = {
+      userId: params.uid,
+      lastDocumentId: params.lastDocumentId ?? existing?.lastDocumentId ?? 'doc-truyen-kieu',
+      lastSegmentIndex:
+        typeof params.lastSegmentIndex === 'number'
+          ? params.lastSegmentIndex
+          : existing?.lastSegmentIndex ?? 0,
+      ttsSettingsJson: params.ttsSettingsJson ?? existing?.ttsSettingsJson ?? '{}',
+      personalNotesJson: params.personalNotesJson ?? existing?.personalNotesJson ?? '[]',
+      readingHistoryJson: params.readingHistoryJson ?? existing?.readingHistoryJson ?? '[]',
+      favoritesJson: params.favoritesJson ?? existing?.favoritesJson ?? '[]',
+      savedDocumentsJson: params.savedDocumentsJson ?? existing?.savedDocumentsJson ?? '[]',
+      updatedAt: new Date(),
+    };
+
+    const rows = await db
+      .insert(userWorkspaceSync)
+      .values(nextValues)
+      .onConflictDoUpdate({
+        target: userWorkspaceSync.userId,
+        set: {
+          lastDocumentId: nextValues.lastDocumentId,
+          lastSegmentIndex: nextValues.lastSegmentIndex,
+          ttsSettingsJson: nextValues.ttsSettingsJson,
+          personalNotesJson: nextValues.personalNotesJson,
+          readingHistoryJson: nextValues.readingHistoryJson,
+          favoritesJson: nextValues.favoritesJson,
+          savedDocumentsJson: nextValues.savedDocumentsJson,
+          updatedAt: new Date(),
+        },
+      })
+      .returning();
+    return rows[0];
+  } catch (error) {
+    console.error('Database query failed in upsertUserWorkspaceSyncRecord:', error);
+    throw new Error('Không thể đồng bộ dữ liệu cá nhân hóa.', { cause: error });
+  }
+}
+

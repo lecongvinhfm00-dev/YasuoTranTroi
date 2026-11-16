@@ -212,10 +212,10 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-card)] p-6">
         <div>
           <h1 className="text-xl font-bold text-[var(--text-main)]">
-            Trình phát Video & Tư liệu Văn học (Video Player)
+            Thư viện Video & Tư liệu Văn học
           </h1>
           <p className="text-xs text-[var(--text-muted)]">
-            Hỗ trợ MP4, WebM, điều chỉnh tốc độ phát (0.5x – 2x), phụ đề văn học đồng bộ, Picture-in-Picture và toàn màn hình.
+            Hỗ trợ MP4, WebM, điều chỉnh tốc độ phát (0.5x – 2.0x), phụ đề văn học đồng bộ, hình trong hình và toàn màn hình.
           </p>
         </div>
 
@@ -233,7 +233,7 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
             className="flex items-center gap-2 rounded-lg bg-[#8275F5] px-4 py-2 text-xs font-semibold text-white hover:bg-[#7162E8] transition-colors whitespace-nowrap"
           >
             <Upload className="h-4 w-4" />
-            <span>Import Video (MP4 / WebM)</span>
+            <span>Tải video lên (MP4 / WebM)</span>
           </button>
         </div>
       </div>

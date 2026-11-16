@@ -209,7 +209,7 @@ export const BottomPlayer: React.FC<BottomPlayerProps> = ({ engineState }) => {
         <div className="hidden sm:flex items-center justify-end gap-3 w-1/4">
           {(isDucked || ttsActive) && (
             <span className="text-[11px] font-medium text-[#E9C878] whitespace-nowrap">
-              Ducking {engineState.duckingConfig.duckingLevelPercent}%
+              Giảm âm nền {engineState.duckingConfig.duckingLevelPercent}%
             </span>
           )}
 
@@ -228,7 +228,7 @@ export const BottomPlayer: React.FC<BottomPlayerProps> = ({ engineState }) => {
 
           <input
             type="range"
-            aria-label="Âm lượng Master"
+            aria-label="Âm lượng chính"
             min={0}
             max={1}
             step={0.02}
@@ -262,10 +262,10 @@ export const BottomPlayer: React.FC<BottomPlayerProps> = ({ engineState }) => {
                 <AudioWaveform className="h-5 w-5 text-[#8275F5]" />
                 <div>
                   <h2 className="text-base font-bold text-[var(--text-main)]">
-                    Master Bot Player — Web Audio Engine & Spectrum Analyzer
+                    Trình phát Âm thanh Trung tâm & Phân tích Phổ âm
                   </h2>
                   <p className="text-xs text-[var(--text-muted)]">
-                    Xử lý âm thanh hợp nhất · Tự động giảm nhạc nền (Audio Ducking) khi đọc văn học
+                    Xử lý âm thanh hợp nhất · Tự động giảm nhạc nền khi đọc văn bản tiếng Việt
                   </p>
                 </div>
               </div>
@@ -313,10 +313,10 @@ export const BottomPlayer: React.FC<BottomPlayerProps> = ({ engineState }) => {
                         }`}
                       >
                         {mode === 'spectrum'
-                          ? 'Spectrum Analyzer'
+                          ? 'Phổ tần số'
                           : mode === 'waveform'
-                          ? 'Waveform'
-                          : 'Equalizer Bars'}
+                          ? 'Dạng sóng âm'
+                          : 'Thanh cân bằng'}
                       </button>
                     ))}
                   </div>
@@ -324,7 +324,7 @@ export const BottomPlayer: React.FC<BottomPlayerProps> = ({ engineState }) => {
                   <button
                     type="button"
                     onClick={() =>
-                       isDucked
+                      isDucked
                         ? masterAudioEngine.releaseDucking()
                         : masterAudioEngine.engageDucking()
                     }
@@ -335,7 +335,7 @@ export const BottomPlayer: React.FC<BottomPlayerProps> = ({ engineState }) => {
                     }`}
                   >
                     <Mic className="h-3.5 w-3.5" />
-                    <span>{isDucked ? 'Khôi phục âm lượng gốc' : 'Thử Audio Ducking'}</span>
+                    <span>{isDucked ? 'Khôi phục âm lượng gốc' : 'Thử giảm nhạc nền'}</span>
                   </button>
                 </div>
 

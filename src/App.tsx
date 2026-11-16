@@ -1,7 +1,5 @@
 import { useEffect, useState } from 'react';
-import { onAuthStateChanged, signInWithPopup, signOut } from 'firebase/auth';
-import { Menu, Sparkles } from 'lucide-react';
-import { auth, googleAuthProvider } from './lib/firebase.ts';
+import { Menu, Sparkles, CloudCheck, RefreshCw, AlertCircle, BookOpenCheck } from 'lucide-react';
 import {
   HealthStatusResponse,
   setMemoryAuthToken,
@@ -23,32 +21,66 @@ import type {
   ConversationItem,
   LiteratureDocument,
   NavigationModule,
+  PersonalNoteItem,
   PlaylistItem,
   PresentationDeck,
+  ReadingHistoryItem,
+  SyncStatusState,
+  TTSSettingsConfig,
   UserProfile,
   VideoItem,
 } from './types/studio.ts';
 import { parseMarkdownToSlides } from './utils/studioLogic.ts';
+import { useAuth } from './context/AuthContext.tsx';
+import { fetchUserWorkspaceData, syncUserWorkspaceData } from './lib/userData.ts';
+import { VI } from './i18n/vi.ts';
 import { Sidebar } from './components/Sidebar.tsx';
 import { BottomPlayer } from './components/BottomPlayer.tsx';
 import { RightPanel } from './components/RightPanel.tsx';
 import { DashboardView } from './components/DashboardView.tsx';
+import { ReaderView } from './components/ReaderView.tsx';
 import { MusicLibraryView } from './components/MusicLibraryView.tsx';
 import { VideoPlayerView } from './components/VideoPlayerView.tsx';
 import { LiteratureLibraryView } from './components/LiteratureLibraryView.tsx';
 import { AIAssistantView } from './components/AIAssistantView.tsx';
 import { PlaylistView } from './components/PlaylistView.tsx';
+import { NotesView } from './components/NotesView.tsx';
+import { HistoryView } from './components/HistoryView.tsx';
 import { PresentationView } from './components/PresentationView.tsx';
 import { SettingsView } from './components/SettingsView.tsx';
 
+const DEFAULT_NOTES: PersonalNoteItem[] = [
+  {
+    id: 'note-seed-1',
+    title: 'Nghệ thuật tả cảnh ngụ tình trong Truyện Kiều',
+    content:
+      'Tám câu cuối đoạn Cảnh ngày xuân và đoạn Kiều ở lầu Ngưng Bích thể hiện bút pháp lấy ngoại cảnh để soi chiếu tâm cảnh của đại thi hào Nguyễn Du.',
+    documentId: 'doc-truyen-kieu',
+    documentTitle: 'Truyện Kiều (Đoạn trích Trao duyên & Cảnh ngày xuân)',
+    tags: ['Truyện Kiều', 'Tả cảnh ngụ tình', 'Trọng tâm'],
+    updatedAt: new Date().toISOString(),
+  },
+  {
+    id: 'note-seed-2',
+    title: 'Cảm hứng lãng mạn và bi tráng trong Tây Tiến',
+    content:
+      'Hình tượng người lính Tây Tiến vừa mang nét hào hoa của thanh niên Hà Nội ("Đêm mơ Hà Nội dáng kiều thơm") vừa mang vẻ đẹp bi tráng bất tử ("Áo bào thay chiếu anh về đất").',
+    documentId: 'doc-tay-tien',
+    documentTitle: 'Tây Tiến — Quang Dũng',
+    tags: ['Tây Tiến', 'Quang Dũng', 'Thơ kháng chiến'],
+    updatedAt: new Date().toISOString(),
+  },
+];
+
 export default function App() {
+  const auth = useAuth();
   const [activeModule, setActiveModule] = useState<NavigationModule>('dashboard');
   const [startupModule, setStartupModule] = useState<NavigationModule>('dashboard');
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
   const [language, setLanguage] = useState<'vi' | 'en'>('vi');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
-  // Studio Data State (IndexedDB)
+  // Dữ liệu thư viện cục bộ (IndexedDB)
   const [tracks, setTracks] = useState<AudioTrack[]>([]);
   const [videos, setVideos] = useState<VideoItem[]>([]);
   const [documents, setDocuments] = useState<LiteratureDocument[]>([]);
@@ -62,19 +94,37 @@ export default function App() {
     breakdown: { tracksBytes: 0, videosBytes: 0, docsBytes: 0 },
   });
 
-  // Audio Engine State
+  // Trạng thái đọc văn bản, ghi chú cá nhân & đồng bộ theo tài khoản ẩn danh
+  const [lastDocumentId, setLastDocumentId] = useState<string>('doc-truyen-kieu');
+  const [lastSegmentIndex, setLastSegmentIndex] = useState<number>(0);
+  const [personalNotes, setPersonalNotes] = useState<PersonalNoteItem[]>(DEFAULT_NOTES);
+  const [readingHistory, setReadingHistory] = useState<ReadingHistoryItem[]>([]);
+  const [ttsSettings, setTtsSettings] = useState<TTSSettingsConfig>({
+    voiceURI: '',
+    rate: 1.0,
+    pitch: 1.0,
+    volume: 1.0,
+    autoNextSegment: true,
+    autoScroll: true,
+    highlightActive: true,
+    fontSize: 'base',
+  });
+  const [syncStatus, setSyncStatus] = useState<SyncStatusState>('syncing');
+  const [sessionToken, setSessionToken] = useState<string>('');
+
+  // Trạng thái bộ xử lý âm thanh
   const [engineState, setEngineState] = useState<AudioEngineState>(
     masterAudioEngine.getState()
   );
 
-  // Cloud / Backend / AI State
+  // Tài khoản ẩn danh tự động & AI
   const [user, setUser] = useState<UserProfile>({
-    uid: 'guest_studio',
-    username: 'Khách trải nghiệm',
-    email: 'guest@literature.studio',
-    role: 'guest',
+    uid: 'anon_initializing',
+    username: 'Độc giả Ẩn danh',
+    email: 'anonymous@literature.studio',
+    role: 'user',
     dailyQuota: 15,
-    isAuthenticated: false,
+    isAuthenticated: true,
   });
   const [quotaUsed, setQuotaUsed] = useState(0);
   const [quotaLimit, setQuotaLimit] = useState(15);
@@ -93,12 +143,10 @@ export default function App() {
     setTimeout(() => setToastMsg(null), 3500);
   };
 
-  // Sync theme with <html class="dark">
   useEffect(() => {
     document.documentElement.classList.toggle('dark', theme === 'dark');
   }, [theme]);
 
-  // Subscribe to Master Bot Player
   useEffect(() => {
     return masterAudioEngine.subscribe((nextState) => {
       setEngineState(nextState);
@@ -110,7 +158,7 @@ export default function App() {
     setStorageInfo(est);
   };
 
-  // Initialize IndexedDB data
+  // Khởi tạo IndexedDB
   useEffect(() => {
     let mounted = true;
     initializeStudioIndexedDb().then(async (data) => {
@@ -144,52 +192,167 @@ export default function App() {
         email: usage.user.email,
         role: usage.user.role,
         dailyQuota: usage.studioQuota.limit,
-        isAuthenticated: usage.user.isAuthenticated,
+        isAuthenticated: true,
       });
       setQuotaUsed(usage.studioQuota.used);
       setQuotaLimit(usage.studioQuota.limit);
       setConversations(convs);
     } catch {
-      // Backend fallback when offline
+      // Giữ trạng thái cục bộ khi ngoại tuyến
     }
   };
 
-  // Listen to Firebase Auth state changes
+  // Đồng bộ dữ liệu cá nhân ngay khi AuthContext xác thực thành công session.user.id (UUID)
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
-      if (fbUser) {
-        const token = await fbUser.getIdToken();
-        setMemoryAuthToken(token);
-      } else {
-        setMemoryAuthToken(null);
-      }
-      await refreshBackendData();
-    });
-    return () => unsubscribe();
-  }, []);
+    if (!auth.userId) return;
+    let mounted = true;
+    const activeToken = auth.session?.access_token || `anon_tok_${auth.userId}`;
 
-  const handleGoogleSignIn = async () => {
-    try {
-      const cred = await signInWithPopup(auth, googleAuthProvider);
-      const token = await cred.user.getIdToken();
-      setMemoryAuthToken(token);
+    (async () => {
+      setSyncStatus('syncing');
+      setSessionToken(activeToken);
+      setMemoryAuthToken(activeToken);
+      setUser((prev) => ({
+        ...prev,
+        uid: auth.userId!,
+        username: auth.displayName,
+        // Yêu cầu 9: Không cấp quyền Admin hoặc Teacher cho tài khoản ẩn danh
+        role: 'user',
+        isAuthenticated: true,
+      }));
+
       await refreshBackendData();
-      showToast(`Đã đăng nhập thành công: ${cred.user.displayName || cred.user.email}`);
-    } catch (err: any) {
-      showToast(
-        err?.message || 'Đăng nhập Google bị hủy hoặc không khả dụng trong khung xem trước.'
+
+      const { data: syncedWorkspace, source } = await fetchUserWorkspaceData(
+        auth.userId!,
+        activeToken
       );
-    }
+      if (!mounted) return;
+
+      if (syncedWorkspace) {
+        if (syncedWorkspace.lastDocumentId) {
+          setLastDocumentId(syncedWorkspace.lastDocumentId);
+        }
+        if (typeof syncedWorkspace.lastSegmentIndex === 'number') {
+          setLastSegmentIndex(syncedWorkspace.lastSegmentIndex);
+        }
+        if (syncedWorkspace.ttsSettings) {
+          setTtsSettings((prev) => ({ ...prev, ...syncedWorkspace.ttsSettings }));
+        }
+        if (
+          Array.isArray(syncedWorkspace.personalNotes) &&
+          syncedWorkspace.personalNotes.length > 0
+        ) {
+          setPersonalNotes(syncedWorkspace.personalNotes);
+        }
+        if (Array.isArray(syncedWorkspace.readingHistory)) {
+          setReadingHistory(syncedWorkspace.readingHistory);
+        }
+      } else {
+        await syncUserWorkspaceData(auth.userId!, activeToken, {
+          lastDocumentId: 'doc-truyen-kieu',
+          lastSegmentIndex: 0,
+          ttsSettings,
+          personalNotes: DEFAULT_NOTES,
+          readingHistory: [],
+        });
+      }
+
+      setSyncStatus(source === 'local' ? 'local' : 'synced');
+    })();
+
+    return () => {
+      mounted = false;
+    };
+  }, [auth.userId, auth.session?.access_token, auth.displayName]);
+
+  // Hàm đồng bộ dữ liệu cá nhân của người dùng ẩn danh lên máy chủ
+  const persistUserWorkspace = async (patch: {
+    lastDocumentId?: string;
+    lastSegmentIndex?: number;
+    ttsSettings?: TTSSettingsConfig;
+    personalNotes?: PersonalNoteItem[];
+    readingHistory?: ReadingHistoryItem[];
+  }) => {
+    if (!user.uid || user.uid === 'anon_initializing') return;
+    setSyncStatus('syncing');
+    const result = await syncUserWorkspaceData(user.uid, sessionToken, {
+      lastDocumentId: patch.lastDocumentId ?? lastDocumentId,
+      lastSegmentIndex: patch.lastSegmentIndex ?? lastSegmentIndex,
+      ttsSettings: patch.ttsSettings ?? ttsSettings,
+      personalNotes: patch.personalNotes ?? personalNotes,
+      readingHistory: patch.readingHistory ?? readingHistory,
+    });
+    setSyncStatus(result.ok ? 'synced' : 'error');
   };
 
-  const handleSignOut = async () => {
-    await signOut(auth);
-    setMemoryAuthToken(null);
-    await refreshBackendData();
-    showToast('Đã đăng xuất về phiên Khách.');
+  // Cập nhật vị trí đọc văn bản gần nhất & lịch sử đọc
+  const handleUpdateReadingPosition = (
+    docId: string,
+    segmentIndex: number,
+    totalSegments: number
+  ) => {
+    setLastDocumentId(docId);
+    setLastSegmentIndex(segmentIndex);
+    const doc = documents.find((d) => d.id === docId);
+    if (!doc) return;
+
+    const progressPercent = Math.round(((segmentIndex + 1) / Math.max(1, totalSegments)) * 100);
+    setReadingHistory((prev) => {
+      const existingIdx = prev.findIndex((item) => item.documentId === docId);
+      const entry: ReadingHistoryItem = {
+        id: `hist-${docId}`,
+        documentId: docId,
+        documentTitle: doc.title,
+        author: doc.author,
+        segmentIndex,
+        totalSegments,
+        progressPercent,
+        updatedAt: new Date().toISOString(),
+      };
+      const next =
+        existingIdx >= 0
+          ? [entry, ...prev.filter((_, i) => i !== existingIdx)]
+          : [entry, ...prev.slice(0, 19)];
+      void persistUserWorkspace({
+        lastDocumentId: docId,
+        lastSegmentIndex: segmentIndex,
+        readingHistory: next,
+      });
+      return next;
+    });
   };
 
-  // Handlers for Music Library
+  const handleUpdateTTSSettings = (partial: Partial<TTSSettingsConfig>) => {
+    setTtsSettings((prev) => {
+      const next = { ...prev, ...partial };
+      void persistUserWorkspace({ ttsSettings: next });
+      return next;
+    });
+  };
+
+  const handleSavePersonalNote = (note: PersonalNoteItem) => {
+    setPersonalNotes((prev) => {
+      const exists = prev.some((n) => n.id === note.id);
+      const next = exists
+        ? prev.map((n) => (n.id === note.id ? note : n))
+        : [note, ...prev];
+      void persistUserWorkspace({ personalNotes: next });
+      return next;
+    });
+    showToast('Đã lưu và đồng bộ ghi chú cá nhân.');
+  };
+
+  const handleDeletePersonalNote = (id: string) => {
+    setPersonalNotes((prev) => {
+      const next = prev.filter((n) => n.id !== id);
+      void persistUserWorkspace({ personalNotes: next });
+      return next;
+    });
+    showToast('Đã xóa ghi chú cá nhân.');
+  };
+
+  // Quản lý Âm nhạc
   const handleAddTrack = async (track: AudioTrack) => {
     await studioStorage.saveTrack(track);
     const next = [track, ...tracks];
@@ -220,7 +383,7 @@ export default function App() {
     setTracks(next);
     masterAudioEngine.setQueue(next, false);
     await refreshStorageStats();
-    showToast(`Đã xóa ${ids.length} bài nhạc khỏi IndexedDB.`);
+    showToast(`Đã xóa ${ids.length} bài nhạc khỏi thư viện.`);
   };
 
   const handleCreatePlaylistFromTracks = async (name: string, trackIds: string[]) => {
@@ -236,7 +399,7 @@ export default function App() {
     setPlaylists((prev) => [newPl, ...prev]);
   };
 
-  // Handlers for Literature Documents
+  // Quản lý Tài liệu Văn học
   const handleSaveDocument = async (doc: LiteratureDocument) => {
     await studioStorage.saveDocument(doc);
     setDocuments((prev) => {
@@ -311,15 +474,19 @@ export default function App() {
     await studioStorage.savePresentation(newDeck);
     setPresentations((prev) => [newDeck, ...prev]);
     setActiveModule('presentation');
-    showToast('Đã chuyển nội dung AI thành bộ Slide thuyết trình!');
+    showToast('Đã chuyển nội dung AI thành bộ trang chiếu thuyết trình!');
   };
 
   const handleExportFullStudioData = () => {
     const payload = {
       exportedAt: new Date().toISOString(),
+      user: { uid: user.uid, username: user.username },
       documents,
+      personalNotes,
+      readingHistory,
       playlists,
       presentations,
+      ttsSettings,
       aiSettings,
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], {
@@ -328,7 +495,7 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `Literature_Studio_Backup_${Date.now()}.json`;
+    a.download = `Literature_Studio_Sao_luu_${Date.now()}.json`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -337,48 +504,47 @@ export default function App() {
 
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-[var(--bg-main)] text-[var(--text-main)]">
-      {/* Main Upper Area: Left Sidebar + Center Workspace + Right Panel */}
+      {/* Không gian chính: Thanh bên trái + Không gian làm việc trung tâm + Bảng công cụ phải */}
       <div className="flex flex-1 min-h-0 overflow-hidden">
         <Sidebar
           activeModule={activeModule}
           onSelectModule={setActiveModule}
           user={user}
+          syncStatus={syncStatus}
           quotaRemaining={quotaRemaining}
           quotaLimit={quotaLimit}
-          onSignIn={handleGoogleSignIn}
-          onSignOut={handleSignOut}
           mobileOpen={mobileMenuOpen}
           onCloseMobile={() => setMobileMenuOpen(false)}
         />
 
-        {/* Center Main Workspace */}
+        {/* Không gian làm việc trung tâm */}
         <div className="flex flex-1 flex-col min-w-0 overflow-hidden">
-          {/* Top Bar Contract: 3 Zones */}
-          <header className="flex h-16 shrink-0 items-center justify-between gap-2 sm:gap-8 border-b border-[var(--border-subtle)] bg-[var(--bg-sidebar)]/80 px-3 sm:px-6">
-            {/* Zone 1: Single-line Brand / Mobile Menu Trigger */}
-            <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+          {/* Thanh tiêu đề trên cùng */}
+          <header className="flex h-16 shrink-0 items-center justify-between gap-2 sm:gap-6 border-b border-[var(--border-subtle)] bg-[var(--bg-sidebar)]/80 px-3 sm:px-6">
+            {/* Khu vực 1: Tên ứng dụng & Nút mở bảng chọn di động */}
+            <div className="flex items-center gap-2 sm:gap-3 shrink-0">
               <button
                 type="button"
                 onClick={() => setMobileMenuOpen(true)}
-                aria-label="Mở menu điều hướng"
+                aria-label="Mở bảng điều hướng"
                 className="rounded-lg p-1.5 text-[var(--text-muted)] hover:bg-[var(--bg-surface)] hover:text-[var(--text-main)] lg:hidden shrink-0"
               >
                 <Menu className="h-5 w-5" />
               </button>
-              <span className="truncate text-xs sm:text-sm font-bold tracking-tight text-[var(--text-main)] whitespace-nowrap">
-                Literature Studio Workspace
+              <span className="text-xs sm:text-sm font-bold tracking-tight text-[var(--text-main)] whitespace-nowrap">
+                {VI.nav[activeModule as keyof typeof VI.nav] || 'Không gian Văn học Số'}
               </span>
             </div>
 
-            {/* Zone 2: 5 concise single-line navigation links */}
+            {/* Khu vực 2: Liên kết điều hướng nhanh */}
             <nav
               aria-label="Điều hướng nhanh trên thanh tiêu đề"
-              className="hidden md:flex items-center gap-6 text-xs font-medium text-[var(--text-muted)]"
+              className="hidden 2xl:flex items-center gap-4 text-xs font-medium text-[var(--text-muted)]"
             >
               <button
                 type="button"
                 onClick={() => setActiveModule('dashboard')}
-                className={`hover:text-[var(--text-main)] transition-colors whitespace-nowrap shrink-0 ${
+                className={`hover:text-[var(--text-main)] transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                   activeModule === 'dashboard' ? 'text-[var(--text-main)] underline underline-offset-4' : ''
                 }`}
               >
@@ -386,35 +552,35 @@ export default function App() {
               </button>
               <button
                 type="button"
+                onClick={() => setActiveModule('reader')}
+                className={`hover:text-[var(--text-main)] transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  activeModule === 'reader' ? 'text-[#E9C878] font-semibold underline underline-offset-4' : ''
+                }`}
+              >
+                Trình đọc văn bản
+              </button>
+              <button
+                type="button"
                 onClick={() => setActiveModule('literature')}
-                className={`hover:text-[var(--text-main)] transition-colors whitespace-nowrap shrink-0 ${
+                className={`hover:text-[var(--text-main)] transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                   activeModule === 'literature' ? 'text-[var(--text-main)] underline underline-offset-4' : ''
                 }`}
               >
-                Tác phẩm
+                Thư viện
               </button>
               <button
                 type="button"
-                onClick={() => setActiveModule('music')}
-                className={`hover:text-[var(--text-main)] transition-colors whitespace-nowrap shrink-0 ${
-                  activeModule === 'music' ? 'text-[var(--text-main)] underline underline-offset-4' : ''
+                onClick={() => setActiveModule('notes')}
+                className={`hover:text-[var(--text-main)] transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  activeModule === 'notes' ? 'text-[var(--text-main)] underline underline-offset-4' : ''
                 }`}
               >
-                Âm nhạc
-              </button>
-              <button
-                type="button"
-                onClick={() => setActiveModule('presentation')}
-                className={`hover:text-[var(--text-main)] transition-colors whitespace-nowrap shrink-0 ${
-                  activeModule === 'presentation' ? 'text-[var(--text-main)] underline underline-offset-4' : ''
-                }`}
-              >
-                Thuyết trình
+                Ghi chú
               </button>
               <button
                 type="button"
                 onClick={() => setActiveModule('settings')}
-                className={`hover:text-[var(--text-main)] transition-colors whitespace-nowrap shrink-0 ${
+                className={`hover:text-[var(--text-main)] transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                   activeModule === 'settings' ? 'text-[var(--text-main)] underline underline-offset-4' : ''
                 }`}
               >
@@ -422,12 +588,43 @@ export default function App() {
               </button>
             </nav>
 
-            {/* Zone 3: 1 Primary Action */}
-            <div className="flex items-center shrink-0">
+            {/* Khu vực 3: Trạng thái đồng bộ & Nút hành động chính */}
+            <div className="flex items-center gap-2.5 shrink-0">
+              <div
+                data-testid="header-sync-badge"
+                className="hidden sm:flex items-center gap-1.5 rounded-lg bg-[var(--bg-surface)] px-2.5 py-1.5 text-[11px] border border-[var(--border-subtle)]"
+              >
+                {syncStatus === 'syncing' ? (
+                  <>
+                    <RefreshCw className="h-3 w-3 text-[#E9C878] animate-spin" />
+                    <span className="text-[#E9C878]">{VI.sync.syncing}</span>
+                  </>
+                ) : syncStatus === 'error' ? (
+                  <>
+                    <AlertCircle className="h-3 w-3 text-[#F16C78]" />
+                    <span className="text-[#F16C78]">{VI.sync.failed}</span>
+                  </>
+                ) : (
+                  <>
+                    <CloudCheck className="h-3.5 w-3.5 text-[#36C98F]" />
+                    <span className="text-[#36C98F]">{VI.sync.synced}</span>
+                  </>
+                )}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setActiveModule('reader')}
+                className="hidden sm:flex items-center gap-1.5 rounded-lg bg-[#E9C878]/15 border border-[#E9C878]/35 px-3 py-2 text-xs font-semibold text-[#E9C878] hover:bg-[#E9C878]/25 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <BookOpenCheck className="h-3.5 w-3.5" />
+                <span>Đọc văn bản</span>
+              </button>
+
               <button
                 type="button"
                 onClick={() => setActiveModule('ai')}
-                className="flex items-center gap-1.5 rounded-lg bg-[#8275F5] px-3.5 py-2 text-xs font-semibold text-white hover:bg-[#7162E8] transition-colors whitespace-nowrap shrink-0"
+                className="flex items-center gap-1.5 rounded-lg bg-[#8275F5] px-3.5 py-2 text-xs font-semibold text-white hover:bg-[#7162E8] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
               >
                 <Sparkles className="h-3.5 w-3.5" />
                 <span>Hỏi Trợ lý Văn học</span>
@@ -435,7 +632,7 @@ export default function App() {
             </div>
           </header>
 
-          {/* Toast Notification */}
+          {/* Thông báo nhanh */}
           {toastMsg && (
             <div className="mx-6 mt-3 rounded-lg bg-[#8275F5]/20 border border-[#8275F5]/40 px-4 py-2 text-xs font-medium text-[var(--text-main)] flex items-center justify-between">
               <span>{toastMsg}</span>
@@ -449,7 +646,7 @@ export default function App() {
             </div>
           )}
 
-          {/* Active Module Viewport */}
+          {/* Khung hiển thị chức năng đang chọn */}
           <main className="flex-1 overflow-y-auto p-6">
             {activeModule === 'dashboard' && (
               <DashboardView
@@ -466,10 +663,47 @@ export default function App() {
                 onSelectModule={setActiveModule}
                 onOpenDocument={(doc) => {
                   setActiveDocument(doc);
-                  setActiveModule('literature');
+                  setLastDocumentId(doc.id);
+                  setLastSegmentIndex(0);
+                  setActiveModule('reader');
                 }}
                 onTriggerMediaImport={() => setActiveModule('music')}
                 onTriggerCreatePlaylist={() => setActiveModule('playlist')}
+              />
+            )}
+
+            {activeModule === 'reader' && (
+              <ReaderView
+                documents={documents}
+                selectedDocId={activeDocument?.id || lastDocumentId || documents[0]?.id || ''}
+                initialSegmentIndex={lastSegmentIndex}
+                ttsSettings={ttsSettings}
+                onSelectDoc={(docId) => {
+                  const found = documents.find((d) => d.id === docId);
+                  if (found) setActiveDocument(found);
+                  setLastDocumentId(docId);
+                  setLastSegmentIndex(0);
+                }}
+                onUpdateReadingPosition={handleUpdateReadingPosition}
+                onUpdateTTSSettings={handleUpdateTTSSettings}
+                onSendToAI={(doc, excerpt) => {
+                  const prompt = excerpt
+                    ? `Hãy phân tích sâu sắc đoạn trích sau trong tác phẩm "${doc.title}" của ${doc.author}:\n\n"${excerpt}"`
+                    : `Hãy phân tích giá trị nội dung và nghệ thuật của tác phẩm "${doc.title}" (${doc.author}).`;
+                  void handleSendDocumentToAi(doc, prompt, 'work_analysis');
+                }}
+                onQuickSaveNote={(title, content, docId) => {
+                  const doc = documents.find((d) => d.id === docId);
+                  handleSavePersonalNote({
+                    id: `note-${Date.now()}`,
+                    title,
+                    content,
+                    documentId: docId,
+                    documentTitle: doc?.title,
+                    tags: ['Trích đoạn đọc', doc?.category || 'Văn học'],
+                    updatedAt: new Date().toISOString(),
+                  });
+                }}
               />
             )}
 
@@ -509,6 +743,12 @@ export default function App() {
                 onSaveDocument={handleSaveDocument}
                 onDeleteDocument={handleDeleteDocument}
                 onSendDocumentToAi={handleSendDocumentToAi}
+                onOpenInDedicatedReader={(doc) => {
+                  setActiveDocument(doc);
+                  setLastDocumentId(doc.id);
+                  setLastSegmentIndex(0);
+                  setActiveModule('reader');
+                }}
               />
             )}
 
@@ -546,6 +786,47 @@ export default function App() {
               />
             )}
 
+            {activeModule === 'notes' && (
+              <NotesView
+                notes={personalNotes}
+                documents={documents}
+                onSaveNote={handleSavePersonalNote}
+                onDeleteNote={handleDeletePersonalNote}
+                onOpenDocumentInReader={(docId) => {
+                  const found = documents.find((d) => d.id === docId);
+                  if (found) setActiveDocument(found);
+                  setLastDocumentId(docId);
+                  setActiveModule('reader');
+                }}
+              />
+            )}
+
+            {activeModule === 'history' && (
+              <HistoryView
+                readingHistory={readingHistory}
+                conversations={conversations}
+                recentTracks={tracks}
+                onContinueReading={(docId, segIdx) => {
+                  const found = documents.find((d) => d.id === docId);
+                  if (found) setActiveDocument(found);
+                  setLastDocumentId(docId);
+                  setLastSegmentIndex(segIdx);
+                  setActiveModule('reader');
+                }}
+                onClearReadingHistory={() => {
+                  setReadingHistory([]);
+                  void persistUserWorkspace({ readingHistory: [] });
+                  showToast('Đã xóa lịch sử đọc văn bản.');
+                }}
+                onOpenConversation={() => {
+                  setActiveModule('ai');
+                }}
+                onPlayTrack={(track) => {
+                  masterAudioEngine.loadTrack(track, true);
+                }}
+              />
+            )}
+
             {activeModule === 'presentation' && (
               <PresentationView
                 presentations={presentations}
@@ -574,8 +855,10 @@ export default function App() {
                 language={language}
                 startupModule={startupModule}
                 user={user}
+                syncStatus={syncStatus}
                 engineState={engineState}
                 aiSettings={aiSettings}
+                ttsSettings={ttsSettings}
                 healthStatus={healthStatus}
                 quotaUsed={quotaUsed}
                 quotaLimit={quotaLimit}
@@ -584,8 +867,7 @@ export default function App() {
                 onChangeLanguage={setLanguage}
                 onChangeStartupModule={setStartupModule}
                 onUpdateAiSettings={setAiSettings}
-                onSignIn={handleGoogleSignIn}
-                onSignOut={handleSignOut}
+                onUpdateTTSSettings={handleUpdateTTSSettings}
                 onRefreshHealth={refreshBackendData}
                 onResetLocalCache={async () => {
                   const fresh = await studioStorage.clearAllAndReset();
@@ -596,15 +878,16 @@ export default function App() {
                   setPresentations(fresh.presentations);
                   setActivities(fresh.activities);
                   await refreshStorageStats();
-                  showToast('Đã xóa cache và khôi phục dữ liệu mẫu mặc định.');
+                  showToast('Đã xóa bộ nhớ đệm và khôi phục dữ liệu mẫu mặc định.');
                 }}
                 onExportFullStudioData={handleExportFullStudioData}
+                onForceSyncNow={() => persistUserWorkspace({})}
               />
             )}
           </main>
         </div>
 
-        {/* Right Context Panel */}
+        {/* Bảng công cụ ngữ cảnh bên phải */}
         <RightPanel
           engineState={engineState}
           activeDocument={activeDocument}
@@ -614,7 +897,7 @@ export default function App() {
         />
       </div>
 
-      {/* Fixed Bottom Master Bot Player */}
+      {/* Trình điều khiển âm thanh cố định dưới đáy */}
       <BottomPlayer engineState={engineState} />
     </div>
   );

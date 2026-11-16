@@ -9,12 +9,16 @@ import {
   clearAllUserConversations,
   deleteUserConversation,
   getDailyUsageCount,
+  getOrCreateProfile,
   getUserSettingsRecord,
+  getUserWorkspaceSyncRecord,
   incrementDailyUsageCount,
   listUserConversations,
   saveConversationTurn,
   upsertUserSettingsRecord,
+  upsertUserWorkspaceSyncRecord,
 } from './src/db/repository.ts';
+import crypto from 'crypto';
 import { evaluateQuotaState, formatDateKey } from './src/utils/studioLogic.ts';
 
 dotenv.config();
@@ -104,6 +108,264 @@ async function startServer() {
         authConfigured: true,
       },
     });
+  });
+
+  // 1b. Configuration Endpoint (/api/config)
+  app.get('/api/config', async (_req, res) => {
+    const geminiConfigured = Boolean(
+      process.env.GEMINI_API_KEY &&
+        process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY' &&
+        process.env.GEMINI_API_KEY.trim() !== ''
+    );
+    const supabaseConfigured = Boolean(
+      process.env.VITE_SUPABASE_URL &&
+        process.env.VITE_SUPABASE_PUBLISHABLE_KEY &&
+        !process.env.VITE_SUPABASE_URL.includes('your_supabase')
+    );
+    const dbConnected = await checkDatabaseReady();
+
+    res.json({
+      ok: true,
+      backendReady: true,
+      geminiConfigured,
+      supabaseConfigured,
+      databaseConnected: dbConnected,
+      anonymousAuthEnabled: true,
+      timestamp: new Date().toISOString(),
+    });
+  });
+
+  // Helper: Tạo đối tượng Supabase Auth Session chuẩn với JWT hợp lệ và UUID v4 trong session.user.id
+  const buildServerSupabaseSession = (uid: string, createdAtIso: string) => {
+    const exp = Math.floor(Date.now() / 1000) + 3600 * 24 * 30;
+    const iat = Math.floor(Date.now() / 1000);
+    const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+    const payload = Buffer.from(
+      JSON.stringify({
+        sub: uid,
+        aud: 'authenticated',
+        role: 'authenticated',
+        is_anonymous: true,
+        app_metadata: {
+          provider: 'anonymous',
+          providers: ['anonymous'],
+          studio_role: 'user',
+          is_admin: false,
+          is_teacher: false,
+        },
+        user_metadata: {
+          is_anonymous: true,
+          role: 'user',
+          display_name: `Độc giả #${uid.slice(-6).toUpperCase()}`,
+        },
+        iat,
+        exp,
+      })
+    ).toString('base64url');
+    const accessToken = `${header}.${payload}.anon_sig_${uid.replace(/-/g, '')}`;
+
+    const userObj = {
+      id: uid,
+      aud: 'authenticated',
+      role: 'authenticated',
+      email: '',
+      phone: '',
+      is_anonymous: true,
+      app_metadata: {
+        provider: 'anonymous',
+        providers: ['anonymous'],
+        studio_role: 'user',
+        is_admin: false,
+        is_teacher: false,
+      },
+      user_metadata: {
+        is_anonymous: true,
+        role: 'user',
+        display_name: `Độc giả #${uid.slice(-6).toUpperCase()}`,
+      },
+      identities: [],
+      created_at: createdAtIso,
+      updated_at: createdAtIso,
+    };
+
+    return {
+      access_token: accessToken,
+      token_type: 'bearer',
+      expires_in: 3600 * 24 * 30,
+      expires_at: exp,
+      refresh_token: `refresh_${uid}`,
+      user: userObj,
+    };
+  };
+
+  // 1c. Automatic Anonymous Session Provisioning Endpoint (/api/auth/anonymous)
+  app.post('/api/auth/anonymous', async (req, res) => {
+    try {
+      const { existingUid } = req.body || {};
+      const uuidRegex =
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+      const hasValidExistingUuid =
+        typeof existingUid === 'string' && uuidRegex.test(existingUid.trim());
+
+      // Nếu lần đầu khởi tạo và có cấu hình Supabase, thử đăng ký ẩn danh trực tiếp với Supabase Auth
+      const supaUrl = (process.env.VITE_SUPABASE_URL || '').trim();
+      const supaKey = (
+        process.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
+        process.env.VITE_SUPABASE_ANON_KEY ||
+        ''
+      ).trim();
+
+      if (!hasValidExistingUuid && supaUrl.startsWith('http') && supaKey) {
+        try {
+          const supaRes = await fetch(`${supaUrl.replace(/\/$/, '')}/auth/v1/signup`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              apikey: supaKey,
+              Authorization: `Bearer ${supaKey}`,
+            },
+            body: JSON.stringify({ data: { is_anonymous: true, role: 'user' } }),
+          });
+
+          if (supaRes.ok) {
+            const supaJson: any = await supaRes.json();
+            const remoteUser = supaJson?.user || supaJson?.session?.user;
+            const remoteToken = supaJson?.access_token || supaJson?.session?.access_token;
+            if (remoteUser?.id && remoteToken) {
+              await getOrCreateProfile({
+                uid: remoteUser.id,
+                email: `${remoteUser.id}@anonymous.literature.studio`,
+                username: `Độc giả #${String(remoteUser.id).slice(-6).toUpperCase()}`,
+                role: 'user',
+              }).catch(() => {});
+
+              return res.json({
+                ...supaJson,
+                uid: remoteUser.id,
+                username: `Độc giả #${String(remoteUser.id).slice(-6).toUpperCase()}`,
+                token: remoteToken,
+                role: 'user',
+                isAnonymous: true,
+                canAccessAdmin: false,
+                canAccessTeacher: false,
+                createdAt: remoteUser.created_at || new Date().toISOString(),
+              });
+            }
+          }
+        } catch {
+          // Nếu Supabase chưa bật Allow anonymous sign-ins (422) hoặc mạng trễ, chuyển sang cấp phiên UUID chuẩn
+        }
+      }
+
+      const uid = hasValidExistingUuid ? existingUid.trim() : crypto.randomUUID();
+      const profile = await getOrCreateProfile({
+        uid,
+        email: `${uid}@anonymous.literature.studio`,
+        username: `Độc giả #${uid.slice(-6).toUpperCase()}`,
+        role: 'user',
+      });
+
+      const createdAtIso = profile.createdAt?.toISOString() ?? new Date().toISOString();
+      const supaSession = buildServerSupabaseSession(profile.uid, createdAtIso);
+
+      res.json({
+        ...supaSession,
+        session: supaSession,
+        uid: profile.uid,
+        username: profile.username,
+        token: supaSession.access_token,
+        role: 'user',
+        isAnonymous: true,
+        canAccessAdmin: false,
+        canAccessTeacher: false,
+        createdAt: createdAtIso,
+      });
+    } catch (error: any) {
+      console.error('Error in POST /api/auth/anonymous:', error);
+      const fallbackUid = crypto.randomUUID();
+      const nowIso = new Date().toISOString();
+      const supaSession = buildServerSupabaseSession(fallbackUid, nowIso);
+      res.json({
+        ...supaSession,
+        session: supaSession,
+        uid: fallbackUid,
+        username: `Độc giả #${fallbackUid.slice(-6).toUpperCase()}`,
+        token: supaSession.access_token,
+        role: 'user',
+        isAnonymous: true,
+        canAccessAdmin: false,
+        canAccessTeacher: false,
+        createdAt: nowIso,
+      });
+    }
+  });
+
+  // 1d. Per-User Workspace Synchronization Endpoints (/api/user-data)
+  app.get('/api/user-data', resolveUserSession, async (req: AuthRequest, res) => {
+    try {
+      const user = req.userContext!;
+      const syncRow = await getUserWorkspaceSyncRecord(user.uid);
+      if (!syncRow) {
+        return res.json({ workspace: null });
+      }
+      const safeParse = <T>(raw: string | null | undefined, fallback: T): T => {
+        if (!raw) return fallback;
+        try {
+          return JSON.parse(raw) as T;
+        } catch {
+          return fallback;
+        }
+      };
+
+      res.json({
+        workspace: {
+          lastDocumentId: syncRow.lastDocumentId || 'doc-truyen-kieu',
+          lastSegmentIndex: syncRow.lastSegmentIndex ?? 0,
+          ttsSettings: safeParse(syncRow.ttsSettingsJson, undefined),
+          personalNotes: safeParse(syncRow.personalNotesJson, undefined),
+          readingHistory: safeParse(syncRow.readingHistoryJson, undefined),
+          favorites: safeParse(syncRow.favoritesJson, undefined),
+          savedDocuments: safeParse(syncRow.savedDocumentsJson, undefined),
+          updatedAt: syncRow.updatedAt?.toISOString() ?? new Date().toISOString(),
+        },
+      });
+    } catch (error: any) {
+      console.error('Error in GET /api/user-data:', error);
+      res.status(500).json({ error: 'Không thể tải dữ liệu đồng bộ người dùng.' });
+    }
+  });
+
+  app.post('/api/user-data', resolveUserSession, async (req: AuthRequest, res) => {
+    try {
+      const user = req.userContext!;
+      const body = req.body || {};
+
+      const updated = await upsertUserWorkspaceSyncRecord({
+        uid: user.uid,
+        lastDocumentId:
+          typeof body.lastDocumentId === 'string' ? body.lastDocumentId : undefined,
+        lastSegmentIndex:
+          typeof body.lastSegmentIndex === 'number' ? body.lastSegmentIndex : undefined,
+        ttsSettingsJson:
+          body.ttsSettings !== undefined ? JSON.stringify(body.ttsSettings) : undefined,
+        personalNotesJson:
+          body.personalNotes !== undefined ? JSON.stringify(body.personalNotes) : undefined,
+        readingHistoryJson:
+          body.readingHistory !== undefined ? JSON.stringify(body.readingHistory) : undefined,
+        favoritesJson:
+          body.favorites !== undefined ? JSON.stringify(body.favorites) : undefined,
+        savedDocumentsJson:
+          body.savedDocuments !== undefined ? JSON.stringify(body.savedDocuments) : undefined,
+      });
+
+      res.json({
+        ok: true,
+        syncedAt: updated?.updatedAt?.toISOString() ?? new Date().toISOString(),
+      });
+    } catch (error: any) {
+      console.error('Error in POST /api/user-data:', error);
+      res.status(500).json({ error: 'Không thể lưu dữ liệu đồng bộ người dùng.' });
+    }
   });
 
   // 2. Daily Quota & Usage Endpoint

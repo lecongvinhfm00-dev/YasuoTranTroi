@@ -46,6 +46,7 @@ interface LiteratureLibraryViewProps {
   onSaveDocument: (doc: LiteratureDocument) => Promise<void>;
   onDeleteDocument: (id: string) => Promise<void>;
   onSendDocumentToAi: (doc: LiteratureDocument, actionLabel: string, mode: AIModeId) => void;
+  onOpenInDedicatedReader?: (doc: LiteratureDocument) => void;
 }
 
 export const LiteratureLibraryView: React.FC<LiteratureLibraryViewProps> = ({
@@ -56,6 +57,7 @@ export const LiteratureLibraryView: React.FC<LiteratureLibraryViewProps> = ({
   onSaveDocument,
   onDeleteDocument,
   onSendDocumentToAi,
+  onOpenInDedicatedReader,
 }) => {
   const [selectedCategory, setSelectedCategory] = useState<'Tất cả' | LiteratureCategory>('Tất cả');
   const [libSearch, setLibSearch] = useState('');
@@ -190,14 +192,25 @@ export const LiteratureLibraryView: React.FC<LiteratureLibraryViewProps> = ({
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
           <div>
             <h1 className="text-xl font-bold text-[var(--text-main)]">
-              Thư viện Văn học & Không gian Đọc – Chú giải (Literature Workspace)
+              Thư viện Văn học & Không gian Đọc – Chú giải
             </h1>
             <p className="text-xs text-[var(--text-muted)]">
-              Quản lý tác phẩm theo 8 phân loại, đánh dấu dẫn chứng, đọc văn bản tiếng Việt bằng Web Speech API (tự động Audio Ducking) và gửi phân tích AI.
+              Quản lý tác phẩm theo 8 phân loại, đánh dấu dẫn chứng, đọc văn bản tiếng Việt và gửi phân tích cùng Trợ lý AI.
             </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5">
+            {currentDoc && onOpenInDedicatedReader && (
+              <button
+                type="button"
+                onClick={() => onOpenInDedicatedReader(currentDoc)}
+                className="flex items-center gap-2 rounded-lg bg-[#E9C878] px-3.5 py-2 text-xs font-semibold text-[#0B0D17] hover:bg-[#E9C878]/90 transition-colors whitespace-nowrap cursor-pointer"
+              >
+                <Volume2 className="h-4 w-4" />
+                <span>Mở trong Trình đọc văn bản (TTS)</span>
+              </button>
+            )}
+
             <input
               ref={fileInputRef}
               type="file"
@@ -209,16 +222,16 @@ export const LiteratureLibraryView: React.FC<LiteratureLibraryViewProps> = ({
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              className="flex items-center gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3.5 py-2 text-xs font-semibold text-[var(--text-main)] hover:border-[#8275F5] transition-colors whitespace-nowrap"
+              className="flex items-center gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3.5 py-2 text-xs font-semibold text-[var(--text-main)] hover:border-[#8275F5] transition-colors whitespace-nowrap cursor-pointer"
             >
               <Upload className="h-4 w-4 text-[#8275F5]" />
-              <span>Import (TXT / MD / PDF / DOCX)</span>
+              <span>Tải tài liệu lên (TXT / MD / PDF)</span>
             </button>
 
             <button
               type="button"
               onClick={() => setShowCreateModal(true)}
-              className="flex items-center gap-2 rounded-lg bg-[#8275F5] px-4 py-2 text-xs font-semibold text-white hover:bg-[#7162E8] transition-colors whitespace-nowrap"
+              className="flex items-center gap-2 rounded-lg bg-[#8275F5] px-4 py-2 text-xs font-semibold text-white hover:bg-[#7162E8] transition-colors whitespace-nowrap cursor-pointer"
             >
               <Plus className="h-4 w-4" />
               <span>Tạo tài liệu mới</span>
@@ -539,7 +552,7 @@ export const LiteratureLibraryView: React.FC<LiteratureLibraryViewProps> = ({
                     ) : (
                       <Copy className="h-3.5 w-3.5" />
                     )}
-                    <span>{copiedNotice ? 'Đã chép' : 'Copy'}</span>
+                    <span>{copiedNotice ? 'Đã chép' : 'Sao chép'}</span>
                   </button>
 
                   <button
@@ -548,7 +561,7 @@ export const LiteratureLibraryView: React.FC<LiteratureLibraryViewProps> = ({
                     className="flex items-center gap-1.5 rounded-lg bg-[var(--bg-surface)] px-3 py-1.5 text-xs font-medium text-[var(--text-main)] hover:bg-[#8275F5] hover:text-white transition-colors"
                   >
                     <Download className="h-3.5 w-3.5" />
-                    <span>Export .MD</span>
+                    <span>Xuất tệp .MD</span>
                   </button>
                 </div>
               </div>
@@ -576,14 +589,14 @@ export const LiteratureLibraryView: React.FC<LiteratureLibraryViewProps> = ({
               )}
             </section>
 
-            {/* Highlights, Annotations, Bookmarks & Personal Notes */}
+            {/* Đánh dấu dẫn chứng, Chú giải, Dấu trang & Ghi chú cá nhân */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              {/* Highlights & Annotations */}
+              {/* Đánh dấu & Chú giải */}
               <section className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-card)] p-5 space-y-4">
                 <div className="flex items-center gap-2">
                   <Highlighter className="h-4 w-4 text-[#E9C878]" />
                   <h3 className="text-sm font-bold text-[var(--text-main)]">
-                    Highlight & Chú giải (Annotations)
+                    Đánh dấu dẫn chứng & Chú giải
                   </h3>
                 </div>
 
@@ -628,7 +641,7 @@ export const LiteratureLibraryView: React.FC<LiteratureLibraryViewProps> = ({
                       type="submit"
                       className="rounded-lg bg-[#8275F5] px-3 py-1.5 font-semibold text-white hover:bg-[#7162E8]"
                     >
-                      Lưu Highlight
+                      Lưu dẫn chứng
                     </button>
                   </div>
                 </form>
@@ -648,12 +661,12 @@ export const LiteratureLibraryView: React.FC<LiteratureLibraryViewProps> = ({
                 </div>
               </section>
 
-              {/* Bookmarks & Personal Notes */}
+              {/* Dấu trang & Ghi chú cá nhân */}
               <section className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-card)] p-5 space-y-4">
                 <div className="flex items-center gap-2">
                   <Bookmark className="h-4 w-4 text-[#8275F5]" />
                   <h3 className="text-sm font-bold text-[var(--text-main)]">
-                    Bookmark & Sổ tay Ghi chú cá nhân
+                    Dấu trang & Sổ tay Ghi chú cá nhân
                   </h3>
                 </div>
 

@@ -107,60 +107,60 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
         </div>
 
-        {/* 7. Quick Actions (6 Actions) */}
+        {/* 7. Thao tác nhanh (6 Thao tác) */}
         <div className="mt-6 grid grid-cols-2 sm:grid-cols-3 gap-3">
           <button
             type="button"
-            onClick={() => onSelectModule('music')}
-            className="flex items-center gap-2.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3.5 py-2.5 text-left text-xs font-semibold text-[var(--text-main)] hover:border-[#8275F5] transition-colors whitespace-nowrap"
+            onClick={() => onSelectModule('reader')}
+            className="flex items-center gap-2.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3.5 py-2.5 text-left text-xs font-semibold text-[var(--text-main)] hover:border-[#8275F5] transition-colors whitespace-nowrap cursor-pointer"
           >
-            <Music className="h-4 w-4 shrink-0 text-[#8275F5]" />
-            <span className="truncate">Open Music Player</span>
+            <BookOpen className="h-4 w-4 shrink-0 text-[#E9C878]" />
+            <span className="truncate">Mở trình đọc văn bản (TTS)</span>
           </button>
 
           <button
             type="button"
             onClick={() => onSelectModule('ai')}
-            className="flex items-center gap-2.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3.5 py-2.5 text-left text-xs font-semibold text-[var(--text-main)] hover:border-[#E9C878] transition-colors whitespace-nowrap"
+            className="flex items-center gap-2.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3.5 py-2.5 text-left text-xs font-semibold text-[var(--text-main)] hover:border-[#E9C878] transition-colors whitespace-nowrap cursor-pointer"
           >
             <Sparkles className="h-4 w-4 shrink-0 text-[#E9C878]" />
-            <span className="truncate">Open AI Assistant</span>
+            <span className="truncate">Mở Trợ lý văn học AI</span>
           </button>
 
           <button
             type="button"
             onClick={() => onSelectModule('presentation')}
-            className="flex items-center gap-2.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3.5 py-2.5 text-left text-xs font-semibold text-[var(--text-main)] hover:border-[#A78BFA] transition-colors whitespace-nowrap"
+            className="flex items-center gap-2.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3.5 py-2.5 text-left text-xs font-semibold text-[var(--text-main)] hover:border-[#A78BFA] transition-colors whitespace-nowrap cursor-pointer"
           >
             <Presentation className="h-4 w-4 shrink-0 text-[#A78BFA]" />
-            <span className="truncate">Create Presentation</span>
+            <span className="truncate">Tạo bài thuyết trình</span>
           </button>
 
           <button
             type="button"
             onClick={() => onSelectModule('literature')}
-            className="flex items-center gap-2.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3.5 py-2.5 text-left text-xs font-semibold text-[var(--text-main)] hover:border-[#36C98F] transition-colors whitespace-nowrap"
+            className="flex items-center gap-2.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3.5 py-2.5 text-left text-xs font-semibold text-[var(--text-main)] hover:border-[#36C98F] transition-colors whitespace-nowrap cursor-pointer"
           >
             <BookOpen className="h-4 w-4 shrink-0 text-[#36C98F]" />
-            <span className="truncate">Open Literature Library</span>
+            <span className="truncate">Mở thư viện văn học</span>
           </button>
 
           <button
             type="button"
             onClick={onTriggerMediaImport}
-            className="flex items-center gap-2.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3.5 py-2.5 text-left text-xs font-semibold text-[var(--text-main)] hover:border-[#8275F5] transition-colors whitespace-nowrap"
+            className="flex items-center gap-2.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3.5 py-2.5 text-left text-xs font-semibold text-[var(--text-main)] hover:border-[#8275F5] transition-colors whitespace-nowrap cursor-pointer"
           >
             <Upload className="h-4 w-4 shrink-0 text-[#8275F5]" />
-            <span className="truncate">Import Media</span>
+            <span className="truncate">Tải nhạc & tư liệu lên</span>
           </button>
 
           <button
             type="button"
             onClick={onTriggerCreatePlaylist}
-            className="flex items-center gap-2.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3.5 py-2.5 text-left text-xs font-semibold text-[var(--text-main)] hover:border-[#E9C878] transition-colors whitespace-nowrap"
+            className="flex items-center gap-2.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3.5 py-2.5 text-left text-xs font-semibold text-[var(--text-main)] hover:border-[#E9C878] transition-colors whitespace-nowrap cursor-pointer"
           >
             <ListPlus className="h-4 w-4 shrink-0 text-[#E9C878]" />
-            <span className="truncate">Create Playlist</span>
+            <span className="truncate">Tạo danh sách phát</span>
           </button>
         </div>
       </section>
@@ -217,11 +217,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
       {/* Main Content Grid: Recently Played, Recent Documents, Favorite Playlists, Recent AI */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* 3. Recently Played Music */}
+        {/* 3. Âm nhạc phát gần đây */}
         <section className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-card)] p-5 space-y-4">
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-bold text-[var(--text-main)]">
-              01. Âm nhạc phát gần đây (Recently Played)
+              01. Âm nhạc phát gần đây
             </h2>
             <button
               type="button"
@@ -268,18 +268,18 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
         </section>
 
-        {/* 4. Recent Documents */}
+        {/* 4. Tác phẩm & Tài liệu gần đây */}
         <section className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-card)] p-5 space-y-4">
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-bold text-[var(--text-main)]">
-              02. Tác phẩm & Tài liệu gần đây (Recent Documents)
+              02. Tác phẩm & Tài liệu gần đây
             </h2>
             <button
               type="button"
               onClick={() => onSelectModule('literature')}
               className="text-xs font-medium text-[#A78BFA] hover:underline"
             >
-              Mở thư viện Văn học
+              Mở thư viện văn học
             </button>
           </div>
 
@@ -309,18 +309,18 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
         </section>
 
-        {/* 5. Favorite Playlists */}
+        {/* 5. Danh sách phát yêu thích */}
         <section className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-card)] p-5 space-y-4">
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-bold text-[var(--text-main)]">
-              03. Danh sách phát yêu thích (Favorite Playlists)
+              03. Danh sách phát yêu thích
             </h2>
             <button
               type="button"
               onClick={() => onSelectModule('playlist')}
               className="text-xs font-medium text-[#A78BFA] hover:underline"
             >
-              Quản lý Playlist
+              Quản lý danh sách phát
             </button>
           </div>
 

@@ -113,15 +113,15 @@ export const RightPanel: React.FC<RightPanelProps> = ({
         </form>
       </section>
 
-      {/* 2. Now Playing & Real-Time Audio Spectrum */}
+      {/* 2. Đang phát & Phổ âm thời gian thực */}
       <section className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-card)] p-4 space-y-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Volume2 className="h-4 w-4 text-[#8275F5]" />
-            <h3 className="text-xs font-bold text-[var(--text-main)]">Đang phát (Now Playing)</h3>
+            <h3 className="text-xs font-bold text-[var(--text-main)]">Đang phát</h3>
           </div>
           <span className="font-tabular text-[11px] text-[var(--text-muted)]">
-            {engineState.isDucked ? 'Ducking Bật' : 'Chuẩn'}
+            {engineState.isDucked ? 'Đang giảm âm nền' : 'Âm lượng chuẩn'}
           </span>
         </div>
 
@@ -153,12 +153,12 @@ export const RightPanel: React.FC<RightPanelProps> = ({
         )}
       </section>
 
-      {/* 3. Active Queue */}
+      {/* 3. Danh sách chờ phát */}
       <section className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-card)] p-4 space-y-2.5">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <ListMusic className="h-4 w-4 text-[#A78BFA]" />
-            <h3 className="text-xs font-bold text-[var(--text-main)]">Danh sách chờ (Queue)</h3>
+            <h3 className="text-xs font-bold text-[var(--text-main)]">Danh sách chờ phát</h3>
           </div>
           <span className="font-tabular text-[11px] text-[var(--text-muted)]">
             {engineState.queue.length} bài

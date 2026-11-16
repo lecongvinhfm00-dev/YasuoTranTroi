@@ -139,10 +139,10 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
           <div>
             <h1 className="text-xl font-bold text-[var(--text-main)]">
-              Quản lý Playlist & Hàng đợi Âm thanh (Queue Management)
+              Quản lý Danh sách phát & Hàng đợi Âm thanh
             </h1>
             <p className="text-xs text-[var(--text-muted)]">
-              Tạo, đổi tên, sắp xếp thứ tự bài nhạc, đồng bộ trực tiếp với Master Bot Player và hỗ trợ Import/Export JSON.
+              Tạo, đổi tên, sắp xếp thứ tự bài nhạc, đồng bộ trực tiếp với trình phát và hỗ trợ nhập/xuất tệp JSON.
             </p>
           </div>
 
@@ -153,7 +153,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
               className="flex items-center gap-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3.5 py-2 text-xs font-semibold text-[var(--text-main)] hover:border-[#E9C878] transition-colors"
             >
               <ListMusic className="h-4 w-4 text-[#E9C878]" />
-              <span>Lưu Queue hiện tại thành Playlist</span>
+              <span>Lưu hàng đợi hiện tại thành danh sách phát</span>
             </button>
 
             <input
@@ -169,7 +169,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
               className="flex items-center gap-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3.5 py-2 text-xs font-semibold text-[var(--text-main)] hover:border-[#8275F5]"
             >
               <Upload className="h-4 w-4 text-[#8275F5]" />
-              <span>Import JSON</span>
+              <span>Nhập tệp JSON</span>
             </button>
           </div>
         </div>
@@ -179,8 +179,8 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
             type="text"
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
-            placeholder="Tên Playlist mới (VD: Nhạc nền đọc Truyện Kiều)..."
-            aria-label="Tên Playlist mới"
+            placeholder="Tên danh sách phát mới (VD: Nhạc nền đọc Truyện Kiều)..."
+            aria-label="Tên danh sách phát mới"
             className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 py-2 text-[var(--text-main)]"
           />
           <input
@@ -188,7 +188,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
             value={newDesc}
             onChange={(e) => setNewDesc(e.target.value)}
             placeholder="Mô tả không gian âm nhạc..."
-            aria-label="Mô tả Playlist mới"
+            aria-label="Mô tả danh sách phát mới"
             className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 py-2 text-[var(--text-main)]"
           />
           <button
@@ -196,7 +196,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
             className="flex items-center justify-center gap-1.5 rounded-lg bg-[#8275F5] px-4 py-2 font-semibold text-white hover:bg-[#7162E8] transition-colors"
           >
             <Plus className="h-4 w-4" />
-            <span>Tạo Playlist mới</span>
+            <span>Tạo danh sách phát mới</span>
           </button>
         </form>
       </section>
@@ -205,7 +205,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
         {/* Left: Playlists List */}
         <div className="lg:col-span-4 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-card)] p-4 space-y-3 h-fit">
           <h2 className="text-xs font-bold text-[var(--text-main)]">
-            Danh sách Playlist ({playlists.length})
+            Danh sách phát ({playlists.length})
           </h2>
           <div className="space-y-2">
             {playlists.map((pl) => {
@@ -336,7 +336,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                   className="flex items-center gap-1.5 rounded-lg bg-[#8275F5] px-4 py-2 text-xs font-semibold text-white hover:bg-[#7162E8]"
                 >
                   <Play className="h-4 w-4" />
-                  <span>Phát toàn bộ Playlist</span>
+                  <span>Phát toàn bộ danh sách</span>
                 </button>
 
                 <button
@@ -345,7 +345,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                   className="flex items-center gap-1.5 rounded-lg bg-[var(--bg-surface)] px-3 py-2 text-xs font-medium text-[var(--text-main)] hover:bg-[#8275F5] hover:text-white transition-colors"
                 >
                   <Download className="h-4 w-4" />
-                  <span>Export JSON</span>
+                  <span>Xuất tệp JSON</span>
                 </button>
               </div>
             </div>

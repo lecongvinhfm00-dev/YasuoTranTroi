@@ -225,10 +225,10 @@ Mỗi slide bắt đầu bằng "## Tiêu đề Slide", theo sau là 3 gạch đ
         <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4">
           <div className="min-w-0 flex-1">
             <h1 className="text-lg sm:text-xl font-bold text-[var(--text-main)]">
-              Chế độ Thuyết trình Văn học & AI Slide Studio
+              Chế độ Thuyết trình Văn học & Thiết kế Trình chiếu AI
             </h1>
             <p className="mt-1 text-xs text-[var(--text-muted)]">
-              Thiết kế slide, gắn nhạc nền tự động giảm âm khi đọc lời dẫn (TTS), kèm đồng hồ bấm giờ và Speaker Notes.
+              Thiết kế trang chiếu, gắn nhạc nền tự động giảm âm khi đọc lời dẫn, kèm đồng hồ bấm giờ và ghi chú diễn giả.
             </p>
           </div>
 
@@ -244,7 +244,7 @@ Mỗi slide bắt đầu bằng "## Tiêu đề Slide", theo sau là 3 gạch đ
             >
               {presentations.map((d) => (
                 <option key={d.id} value={d.id}>
-                  {d.title} ({d.slides.length} slides)
+                  {d.title} ({d.slides.length} trang)
                 </option>
               ))}
             </select>
@@ -255,26 +255,26 @@ Mỗi slide bắt đầu bằng "## Tiêu đề Slide", theo sau là 3 gạch đ
               className="flex items-center justify-center gap-2 rounded-lg bg-[#8275F5] px-4 py-2 text-xs font-semibold text-white hover:bg-[#7162E8] transition-colors whitespace-nowrap"
             >
               <Play className="h-4 w-4 shrink-0" />
-              <span>Trình chiếu (Fullscreen)</span>
+              <span>Trình chiếu toàn màn hình</span>
             </button>
           </div>
         </div>
 
-        {/* AI Presentation Assistant Generator */}
+        {/* Trợ lý soạn thuyết trình bằng AI */}
         <form
           onSubmit={handleGenerateSlidesWithAi}
           className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 pt-2 border-t border-[var(--border-subtle)]"
         >
           <div className="flex items-center gap-2 text-xs font-semibold text-[#E9C878] shrink-0">
             <Sparkles className="h-4 w-4" />
-            <span>AI Presentation Assistant:</span>
+            <span>Trợ lý soạn thuyết trình AI:</span>
           </div>
           <input
             type="text"
             value={aiTopicInput}
             onChange={(e) => setAiTopicInput(e.target.value)}
-            placeholder="Nhập chủ đề cần tạo bộ slide thuyết trình (VD: Vẻ đẹp nhân vật Huấn Cao trong Chữ người tử tù)..."
-            aria-label="Chủ đề tạo slide thuyết trình bằng AI"
+            placeholder="Nhập chủ đề cần tạo bộ trang chiếu thuyết trình (VD: Vẻ đẹp nhân vật Huấn Cao trong Chữ người tử tù)..."
+            aria-label="Chủ đề tạo trang chiếu thuyết trình bằng AI"
             className="flex-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3.5 py-2 text-xs text-[var(--text-main)] placeholder:text-[var(--text-muted)] focus:border-[#8275F5] focus:outline-none"
           />
           <button
@@ -282,7 +282,7 @@ Mỗi slide bắt đầu bằng "## Tiêu đề Slide", theo sau là 3 gạch đ
             disabled={isAiBuilding || !aiTopicInput.trim()}
             className="rounded-lg bg-[var(--bg-surface)] border border-[#8275F5]/50 px-4 py-2 text-xs font-semibold text-[var(--text-main)] hover:bg-[#8275F5] hover:text-white disabled:opacity-50 transition-colors whitespace-nowrap"
           >
-            {isAiBuilding ? 'Đang soạn Slide...' : 'Tạo bộ Slide bằng Gemini'}
+            {isAiBuilding ? 'Đang biên soạn...' : 'Tạo bộ trang chiếu bằng AI'}
           </button>
         </form>
 

@@ -184,10 +184,10 @@ export const MusicLibraryView: React.FC<MusicLibraryViewProps> = ({
         <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
           <div className="space-y-1">
             <h1 className="text-xl font-bold text-[var(--text-main)]">
-              Thư viện Âm nhạc & Master Audio Ducking
+              Thư viện Âm nhạc & Điều phối Nhạc nền Học thuật
             </h1>
             <p className="text-xs text-[var(--text-muted)]">
-              Hỗ trợ kéo thả hoặc chọn file MP3, WAV, OGG, M4A, FLAC. Toàn bộ file âm thanh được lưu trữ bền vững trong IndexedDB.
+              Hỗ trợ kéo thả hoặc chọn tệp MP3, WAV, OGG, M4A, FLAC. Toàn bộ tệp âm thanh được lưu trữ bền vững trên trình duyệt.
             </p>
           </div>
 
@@ -206,7 +206,7 @@ export const MusicLibraryView: React.FC<MusicLibraryViewProps> = ({
               className="flex items-center gap-2 rounded-lg bg-[#8275F5] px-4 py-2 text-xs font-semibold text-white hover:bg-[#7162E8] transition-colors whitespace-nowrap"
             >
               <Upload className="h-4 w-4" />
-              <span>Import File Nhạc</span>
+              <span>Tải tệp nhạc lên</span>
             </button>
 
             <button
