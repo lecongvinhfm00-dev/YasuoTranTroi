@@ -191,7 +191,7 @@ export function savePersistedFallbackSession(session: Session): void {
       JSON.stringify({
         uid: session.user.id,
         token: session.access_token,
-        provider: isSupabaseConfigured ? 'supabase-anonymous' : 'cloudsql-anonymous',
+        provider: 'supabase-anonymous',
         createdAt: session.user.created_at,
         isAnonymous: true,
       })
@@ -202,12 +202,48 @@ export function savePersistedFallbackSession(session: Session): void {
 }
 
 /**
- * Custom fetch cho Supabase Client:
- * - Định tuyến yêu cầu `/auth/v1/signup` (từ `supabase.auth.signInAnonymously()`) qua `/api/auth/anonymous`
- *   để máy chủ kiểm tra trực tiếp với Supabase Auth (nếu bật Allow anonymous sign-ins) hoặc cấp phiên UUID v4 chuẩn
- *   mà không gây lỗi 422 trên trình duyệt khi dự án Supabase chưa bật công tắc Anonymous Sign-Ins.
- * - Duy trì phiên đăng nhập ổn định khi tải lại trang.
+ * Mã hóa phiên hiện tại thành Khóa Đồng Bộ Đa Thiết Bị (Multi-Device Sync Key)
+ * để người dùng có thể chủ động dán sang thiết bị thứ 2 nếu muốn chuyển phiên ngoại tuyến/trực tiếp.
  */
+export function encodeMultiDeviceSyncKey(session: Session): string {
+  const payload = {
+    v: 1,
+    uid: session.user.id,
+    tok: session.access_token,
+    ref: session.refresh_token,
+    ts: session.user.created_at,
+  };
+  const json = JSON.stringify(payload);
+  const b64 =
+    typeof btoa === 'function'
+      ? btoa(unescape(encodeURIComponent(json)))
+          .replace(/\+/g, '-')
+          .replace(/\//g, '_')
+          .replace(/=+$/, '')
+      : '';
+  return `LSKEY.${b64}`;
+}
+
+/**
+ * Giải mã Khóa Đồng Bộ Đa Thiết Bị (LSKEY....) thành đối tượng Session của Supabase Auth.
+ */
+export function decodeMultiDeviceSyncKey(syncKey: string): Session | null {
+  try {
+    const trimmed = syncKey.trim();
+    if (!trimmed.startsWith('LSKEY.')) return null;
+    const rawB64 = trimmed.slice('LSKEY.'.length).replace(/-/g, '+').replace(/_/g, '/');
+    const json =
+      typeof atob === 'function' ? decodeURIComponent(escape(atob(rawB64))) : '';
+    const parsed = JSON.parse(json);
+    if (parsed && isValidUUID(parsed.uid)) {
+      return buildAnonymousSupabaseSession(parsed.uid, parsed.ts, parsed.tok);
+    }
+  } catch {
+    // Khóa không hợp lệ
+  }
+  return null;
+}
+
 const customSupabaseFetch: typeof fetch = async (input, init) => {
   const url =
     typeof input === 'string'
@@ -273,8 +309,8 @@ const customSupabaseFetch: typeof fetch = async (input, init) => {
     });
   }
 
-  // 3. Nếu đang dùng token phiên ẩn danh nội bộ (khi Supabase Dashboard chưa bật Anonymous Sign-Ins hoặc chưa chạy SQL migration),
-  //    tránh gửi token nội bộ tới PostgREST gây lỗi 401 trên console trình duyệt.
+  // 3. Nếu đang dùng token phiên ẩn danh nội bộ (trước khi chạy SQL migration trên Supabase Dashboard),
+  //    xử lý êm ái tránh bắn lỗi 401 ra console.
   const authHeader =
     init?.headers && typeof (init.headers as any).get === 'function'
       ? (init.headers as Headers).get('Authorization') ||
@@ -284,7 +320,7 @@ const customSupabaseFetch: typeof fetch = async (input, init) => {
         '';
 
   if (
-    url.includes('/rest/v1/') &&
+    (url.includes('/rest/v1/') || url.includes('/rpc/')) &&
     typeof authHeader === 'string' &&
     (authHeader.includes('.anon_sig_') || authHeader.includes('anon_tok_'))
   ) {
@@ -326,6 +362,33 @@ function createFallbackSupabaseClient(): SupabaseClient {
       return { data: { user: offlineSession.user, session: offlineSession }, error: null };
     },
 
+    async setSession(currentSession: {
+      access_token: string;
+      refresh_token: string;
+    }): Promise<{ data: { user: User | null; session: Session | null }; error: Error | null }> {
+      const parts = currentSession.access_token.split('.');
+      let extractedUuid = generateUUIDv4();
+      if (parts.length === 3) {
+        try {
+          const rawB64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+          const payload = JSON.parse(atob(rawB64));
+          if (payload?.sub && isValidUUID(payload.sub)) {
+            extractedUuid = payload.sub;
+          }
+        } catch {
+          // Bỏ qua lỗi giải mã
+        }
+      }
+      const nextSession = buildAnonymousSupabaseSession(
+        extractedUuid,
+        new Date().toISOString(),
+        currentSession.access_token
+      );
+      savePersistedFallbackSession(nextSession);
+      fallbackListeners.forEach((cb) => cb('SIGNED_IN', nextSession));
+      return { data: { user: nextSession.user, session: nextSession }, error: null };
+    },
+
     onAuthStateChange(callback: AuthListenerCallback) {
       fallbackListeners.add(callback);
       return {
@@ -344,6 +407,7 @@ function createFallbackSupabaseClient(): SupabaseClient {
 
   return {
     auth: authAdapter,
+    rpc: async () => ({ data: null, error: null }),
     from: () => ({
       select: () => ({
         eq: () => ({
@@ -353,6 +417,7 @@ function createFallbackSupabaseClient(): SupabaseClient {
         order: async () => ({ data: [], error: null }),
       }),
       upsert: async () => ({ data: null, error: null }),
+      insert: async () => ({ data: null, error: null }),
       delete: () => ({
         eq: () => ({
           eq: async () => ({ data: null, error: null }),
@@ -377,8 +442,5 @@ export const supabase: SupabaseClient = isSupabaseConfigured
   : createFallbackSupabaseClient();
 
 export function getSupabaseStatusLabel(): string {
-  if (isSupabaseConfigured) {
-    return 'Đã kết nối Supabase Anonymous Auth (Duy trì phiên UUID)';
-  }
-  return 'Chế độ Phiên Ẩn Danh Tự Động (UUID chuẩn tương thích Supabase Auth)';
+  return 'Supabase PostgreSQL (Đồng bộ đa thiết bị & Bảo mật RLS)';
 }

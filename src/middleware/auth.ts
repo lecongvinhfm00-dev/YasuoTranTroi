@@ -1,13 +1,11 @@
 import { Request, Response, NextFunction } from 'express';
-import { adminAuth } from '../lib/firebase-admin.ts';
-import { getOrCreateProfile } from '../db/repository.ts';
 
 export interface AuthUserContext {
   uid: string;
   email: string;
   username: string;
   avatarUrl?: string;
-  role: 'guest' | 'user' | 'admin';
+  role: 'user';
   dailyQuota: number;
   isAuthenticated: boolean;
 }
@@ -16,11 +14,12 @@ export interface AuthRequest extends Request {
   userContext?: AuthUserContext;
 }
 
+const UUID_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 /**
- * Authenticates requests via Firebase Bearer ID Token.
- * Also supports scoped Studio Guest Workspace sessions via x-studio-guest-id
- * so unauthenticated users can test the studio within a sandboxed guest quota,
- * while never allowing frontend role escalation.
+ * Xác thực yêu cầu từ Supabase Auth Bearer JWT (lấy UUID từ payload.sub / session.user.id).
+ * Tuyệt đối không sử dụng Cloud SQL và không cấp quyền Admin/Teacher cho tài khoản ẩn danh.
  */
 export const resolveUserSession = async (
   req: AuthRequest,
@@ -32,35 +31,40 @@ export const resolveUserSession = async (
   if (authHeader && authHeader.startsWith('Bearer ')) {
     const token = authHeader.split('Bearer ')[1].trim();
     if (token && token !== 'null' && token !== 'undefined') {
-      // 1. Hỗ trợ phiên tài khoản ẩn danh tự động (anon_tok_<uid>)
-      if (token.startsWith('anon_tok_')) {
-        const rawAnonUid = token
-          .slice('anon_tok_'.length)
-          .replace(/[^a-zA-Z0-9_-]/g, '')
-          .slice(0, 64);
-        const uid = rawAnonUid || 'anon_default_user';
+      // 1. Giải mã JWT của Supabase Anonymous Auth (lấy UUID chuẩn từ payload.sub)
+      const parts = token.split('.');
+      if (parts.length === 3) {
         try {
-          const profile = await getOrCreateProfile({
-            uid,
-            email: `${uid}@anonymous.literature.studio`,
-            username: `Độc giả #${uid.slice(-6).toUpperCase()}`,
-            role: 'user',
-          });
+          const payloadRaw = Buffer.from(parts[1], 'base64url').toString('utf8');
+          const payload = JSON.parse(payloadRaw);
+          if (payload && typeof payload.sub === 'string' && UUID_REGEX.test(payload.sub.trim())) {
+            const supaUuid = payload.sub.trim();
+            req.userContext = {
+              uid: supaUuid,
+              email: `${supaUuid}@supabase.literature.studio`,
+              username:
+                payload.user_metadata?.display_name ||
+                `Độc giả #${supaUuid.slice(-6).toUpperCase()}`,
+              // Yêu cầu bảo mật: Tài khoản ẩn danh luôn bị khóa ở role = 'user'
+              role: 'user',
+              dailyQuota: 15,
+              isAuthenticated: true,
+            };
+            return next();
+          }
+        } catch {
+          // Tiếp tục kiểm tra định dạng token dự phòng bên dưới
+        }
+      }
+
+      // 2. Hỗ trợ token phiên ẩn danh định dạng anon_tok_<uuid>
+      if (token.startsWith('anon_tok_')) {
+        const rawUuid = token.slice('anon_tok_'.length).trim();
+        if (UUID_REGEX.test(rawUuid)) {
           req.userContext = {
-            uid: profile.uid,
-            email: profile.email,
-            username: profile.username,
-            role: 'user',
-            dailyQuota: profile.dailyQuota,
-            isAuthenticated: true,
-          };
-          return next();
-        } catch (err) {
-          console.error('Anonymous token profile resolution error:', err);
-          req.userContext = {
-            uid,
-            email: `${uid}@anonymous.literature.studio`,
-            username: `Độc giả #${uid.slice(-6).toUpperCase()}`,
+            uid: rawUuid,
+            email: `${rawUuid}@supabase.literature.studio`,
+            username: `Độc giả #${rawUuid.slice(-6).toUpperCase()}`,
             role: 'user',
             dailyQuota: 15,
             isAuthenticated: true,
@@ -68,97 +72,29 @@ export const resolveUserSession = async (
           return next();
         }
       }
-
-      // 2. Hỗ trợ Firebase ID Token hoặc JWT (Supabase Anonymous JWT)
-      try {
-        const decoded = await adminAuth.verifyIdToken(token);
-        const email = decoded.email || `${decoded.uid}@user.literature.studio`;
-        const username = decoded.name || email.split('@')[0] || 'Độc giả Văn học';
-        const profile = await getOrCreateProfile({
-          uid: decoded.uid,
-          email,
-          username,
-          avatarUrl: decoded.picture || undefined,
-        });
-
-        req.userContext = {
-          uid: profile.uid,
-          email: profile.email,
-          username: profile.username,
-          avatarUrl: profile.avatarUrl || undefined,
-          role: (profile.role as 'guest' | 'user' | 'admin') || 'user',
-          dailyQuota: profile.dailyQuota,
-          isAuthenticated: true,
-        };
-        return next();
-      } catch {
-        // Giải mã payload JWT của Supabase Anonymous Auth (lấy UUID từ payload.sub / session.user.id)
-        try {
-          const parts = token.split('.');
-          if (parts.length === 3) {
-            const payloadRaw = Buffer.from(parts[1], 'base64url').toString('utf8');
-            const payload = JSON.parse(payloadRaw);
-            if (payload && typeof payload.sub === 'string' && payload.sub.length > 5) {
-              const supaUuid = payload.sub.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64);
-              const profile = await getOrCreateProfile({
-                uid: supaUuid,
-                email: `${supaUuid}@supabase.literature.studio`,
-                username: `Độc giả #${supaUuid.slice(-6).toUpperCase()}`,
-                role: 'user',
-              });
-              req.userContext = {
-                uid: profile.uid,
-                email: profile.email,
-                username: profile.username,
-                // Yêu cầu 9: Không cấp quyền Admin hoặc Teacher cho tài khoản ẩn danh
-                role: 'user',
-                dailyQuota: profile.dailyQuota,
-                isAuthenticated: true,
-              };
-              return next();
-            }
-          }
-        } catch {
-          // Tiếp tục xuống fallback ẩn danh bên dưới
-        }
-      }
     }
   }
 
-  // 3. Fallback phiên ẩn danh theo header x-studio-guest-id
-  const rawGuestId = String(req.headers['x-studio-guest-id'] || 'anon-default')
-    .replace(/[^a-zA-Z0-9_-]/g, '')
-    .slice(0, 48);
-  const guestUid = rawGuestId.startsWith('anon') ? rawGuestId : `anon_${rawGuestId || 'studio'}`;
-
-  try {
-    const profile = await getOrCreateProfile({
-      uid: guestUid,
-      email: `${guestUid}@anonymous.literature.studio`,
-      username: `Độc giả #${guestUid.slice(-6).toUpperCase()}`,
-      role: 'user',
+  // Không giả định hai tài khoản ẩn danh khác nhau là cùng một người:
+  // nếu thiếu token hợp lệ, từ chối truy cập dữ liệu cá nhân thay vì dùng chung một tài khoản mặc định.
+  if (req.path.startsWith('/api/user-data') || req.path.startsWith('/api/device-sync')) {
+    return res.status(401).json({
+      error: 'Yêu cầu phiên đăng nhập Supabase hợp lệ (session.user.id) để đồng bộ dữ liệu.',
     });
-
-    req.userContext = {
-      uid: profile.uid,
-      email: profile.email,
-      username: profile.username,
-      role: 'user',
-      dailyQuota: profile.dailyQuota,
-      isAuthenticated: true,
-    };
-    return next();
-  } catch (error) {
-    console.error('Fallback session resolution error:', error);
-    req.userContext = {
-      uid: guestUid,
-      email: `${guestUid}@anonymous.literature.studio`,
-      username: `Độc giả #${guestUid.slice(-6).toUpperCase()}`,
-      role: 'user',
-      dailyQuota: 15,
-      isAuthenticated: true,
-    };
-    return next();
   }
-};
 
+  const headerUuid = String(req.headers['x-supabase-user-id'] || '').trim();
+  const safeUid = UUID_REGEX.test(headerUuid)
+    ? headerUuid
+    : '00000000-0000-4000-8000-000000000000';
+
+  req.userContext = {
+    uid: safeUid,
+    email: `${safeUid}@supabase.literature.studio`,
+    username: `Độc giả #${safeUid.slice(-6).toUpperCase()}`,
+    role: 'user',
+    dailyQuota: 15,
+    isAuthenticated: true,
+  };
+  return next();
+};

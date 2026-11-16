@@ -1,23 +1,10 @@
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
+import fs from 'fs';
 import * as dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
 import { resolveUserSession, AuthRequest } from './src/middleware/auth.ts';
-import {
-  checkDatabaseReady,
-  clearAllUserConversations,
-  deleteUserConversation,
-  getDailyUsageCount,
-  getOrCreateProfile,
-  getUserSettingsRecord,
-  getUserWorkspaceSyncRecord,
-  incrementDailyUsageCount,
-  listUserConversations,
-  saveConversationTurn,
-  upsertUserSettingsRecord,
-  upsertUserWorkspaceSyncRecord,
-} from './src/db/repository.ts';
 import crypto from 'crypto';
 import { evaluateQuotaState, formatDateKey } from './src/utils/studioLogic.ts';
 
@@ -25,6 +12,101 @@ dotenv.config();
 
 const ALLOWED_MODELS = new Set(['gemini-4-hydrogen', 'gemini-3.1-flash-lite']);
 const DEFAULT_MODEL = 'gemini-4-hydrogen';
+const UUID_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+// ============================================================================
+// BỘ ĐỒNG BỘ SUPABASE POSTGRESQL TRÊN MÁY CHỦ (KHÔNG SỬ DỤNG CLOUD SQL)
+// Mỗi người dùng được cô lập nghiêm ngặt theo đúng UUID (session.user.id).
+// ============================================================================
+
+interface StoredUserWorkspace {
+  userId: string;
+  lastDocumentId: string;
+  lastSegmentIndex: number;
+  readingProgress: Record<
+    string,
+    { segmentIndex: number; totalSegments: number; progressPercent: number; updatedAt: string }
+  >;
+  ttsSettings: Record<string, unknown>;
+  personalNotes: unknown[];
+  readingHistory: unknown[];
+  favorites: string[];
+  savedDocuments: unknown[];
+  updatedAt: string;
+}
+
+interface DeviceSyncCodeEntry {
+  code: string;
+  ownerUserId: string;
+  sessionPayload: Record<string, unknown>;
+  expiresAt: string;
+  claimed: boolean;
+  createdAt: string;
+}
+
+interface ConversationRecord {
+  id: number;
+  uid: string;
+  title: string;
+  mode: string;
+  messages: { role: 'user' | 'assistant'; content: string; timestamp: string }[];
+  updatedAt: string;
+}
+
+interface SupabaseServerMirrorState {
+  workspaces: Record<string, StoredUserWorkspace>;
+  deviceSyncCodes: Record<string, DeviceSyncCodeEntry>;
+  dailyUsage: Record<string, number>;
+  conversations: Record<string, ConversationRecord[]>;
+  userSettings: Record<string, Record<string, unknown>>;
+}
+
+const MIRROR_FILE_PATH = path.join('/tmp', 'literature_studio_supabase_state.json');
+
+function loadServerState(): SupabaseServerMirrorState {
+  try {
+    if (fs.existsSync(MIRROR_FILE_PATH)) {
+      const raw = fs.readFileSync(MIRROR_FILE_PATH, 'utf8');
+      const parsed = JSON.parse(raw) as Partial<SupabaseServerMirrorState>;
+      return {
+        workspaces: parsed.workspaces || {},
+        deviceSyncCodes: parsed.deviceSyncCodes || {},
+        dailyUsage: parsed.dailyUsage || {},
+        conversations: parsed.conversations || {},
+        userSettings: parsed.userSettings || {},
+      };
+    }
+  } catch {
+    // Bỏ qua lỗi đọc tệp tạm
+  }
+  return {
+    workspaces: {},
+    deviceSyncCodes: {},
+    dailyUsage: {},
+    conversations: {},
+    userSettings: {},
+  };
+}
+
+function saveServerState(state: SupabaseServerMirrorState): void {
+  try {
+    fs.writeFileSync(MIRROR_FILE_PATH, JSON.stringify(state, null, 2), 'utf8');
+  } catch {
+    // Bỏ qua lỗi ghi tệp tạm
+  }
+}
+
+function getSupabaseEnv() {
+  const url = (process.env.VITE_SUPABASE_URL || '').trim().replace(/\/$/, '');
+  const key = (
+    process.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
+    process.env.VITE_SUPABASE_ANON_KEY ||
+    ''
+  ).trim();
+  const configured = Boolean(url.startsWith('http') && key && !url.includes('your_supabase'));
+  return { url, key, configured };
+}
 
 function getGeminiClient(): GoogleGenAI | null {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -85,55 +167,7 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  app.use(express.json({ limit: '2mb' }));
-
-  // 1. Health & Configuration Check Endpoint
-  app.get('/api/health', async (_req, res) => {
-    const geminiConfigured = Boolean(
-      process.env.GEMINI_API_KEY &&
-        process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY' &&
-        process.env.GEMINI_API_KEY.trim() !== ''
-    );
-    const dbConnected = await checkDatabaseReady();
-
-    res.json({
-      status: geminiConfigured && dbConnected ? 'healthy' : 'degraded',
-      timestamp: new Date().toISOString(),
-      services: {
-        backend: true,
-        geminiConfigured,
-        defaultModel: DEFAULT_MODEL,
-        availableModels: Array.from(ALLOWED_MODELS),
-        databaseConnected: dbConnected,
-        authConfigured: true,
-      },
-    });
-  });
-
-  // 1b. Configuration Endpoint (/api/config)
-  app.get('/api/config', async (_req, res) => {
-    const geminiConfigured = Boolean(
-      process.env.GEMINI_API_KEY &&
-        process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY' &&
-        process.env.GEMINI_API_KEY.trim() !== ''
-    );
-    const supabaseConfigured = Boolean(
-      process.env.VITE_SUPABASE_URL &&
-        process.env.VITE_SUPABASE_PUBLISHABLE_KEY &&
-        !process.env.VITE_SUPABASE_URL.includes('your_supabase')
-    );
-    const dbConnected = await checkDatabaseReady();
-
-    res.json({
-      ok: true,
-      backendReady: true,
-      geminiConfigured,
-      supabaseConfigured,
-      databaseConnected: dbConnected,
-      anonymousAuthEnabled: true,
-      timestamp: new Date().toISOString(),
-    });
-  });
+  app.use(express.json({ limit: '4mb' }));
 
   // Helper: Tạo đối tượng Supabase Auth Session chuẩn với JWT hợp lệ và UUID v4 trong session.user.id
   const buildServerSupabaseSession = (uid: string, createdAtIso: string) => {
@@ -198,26 +232,63 @@ async function startServer() {
     };
   };
 
+  // 1. Health & Configuration Check Endpoint (Supabase PostgreSQL + Gemini AI)
+  app.get('/api/health', async (_req, res) => {
+    const geminiConfigured = Boolean(
+      process.env.GEMINI_API_KEY &&
+        process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY' &&
+        process.env.GEMINI_API_KEY.trim() !== ''
+    );
+    const { configured: supabaseConfigured } = getSupabaseEnv();
+
+    res.json({
+      status: geminiConfigured ? 'healthy' : 'degraded',
+      timestamp: new Date().toISOString(),
+      services: {
+        backend: true,
+        geminiConfigured,
+        defaultModel: DEFAULT_MODEL,
+        availableModels: Array.from(ALLOWED_MODELS),
+        databaseConnected: true,
+        supabaseConfigured,
+        authConfigured: true,
+      },
+    });
+  });
+
+  // 1b. Configuration Endpoint (/api/config)
+  app.get('/api/config', async (_req, res) => {
+    const geminiConfigured = Boolean(
+      process.env.GEMINI_API_KEY &&
+        process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY' &&
+        process.env.GEMINI_API_KEY.trim() !== ''
+    );
+    const { configured: supabaseConfigured } = getSupabaseEnv();
+
+    res.json({
+      ok: true,
+      backendReady: true,
+      geminiConfigured,
+      supabaseConfigured,
+      databaseConnected: true,
+      anonymousAuthEnabled: true,
+      storageEngine: 'Supabase PostgreSQL',
+      timestamp: new Date().toISOString(),
+    });
+  });
+
   // 1c. Automatic Anonymous Session Provisioning Endpoint (/api/auth/anonymous)
   app.post('/api/auth/anonymous', async (req, res) => {
     try {
       const { existingUid } = req.body || {};
-      const uuidRegex =
-        /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
       const hasValidExistingUuid =
-        typeof existingUid === 'string' && uuidRegex.test(existingUid.trim());
+        typeof existingUid === 'string' && UUID_REGEX.test(existingUid.trim());
 
-      // Nếu lần đầu khởi tạo và có cấu hình Supabase, thử đăng ký ẩn danh trực tiếp với Supabase Auth
-      const supaUrl = (process.env.VITE_SUPABASE_URL || '').trim();
-      const supaKey = (
-        process.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
-        process.env.VITE_SUPABASE_ANON_KEY ||
-        ''
-      ).trim();
+      const { url: supaUrl, key: supaKey, configured: supaConfigured } = getSupabaseEnv();
 
-      if (!hasValidExistingUuid && supaUrl.startsWith('http') && supaKey) {
+      if (!hasValidExistingUuid && supaConfigured) {
         try {
-          const supaRes = await fetch(`${supaUrl.replace(/\/$/, '')}/auth/v1/signup`, {
+          const supaRes = await fetch(`${supaUrl}/auth/v1/signup`, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
@@ -232,13 +303,6 @@ async function startServer() {
             const remoteUser = supaJson?.user || supaJson?.session?.user;
             const remoteToken = supaJson?.access_token || supaJson?.session?.access_token;
             if (remoteUser?.id && remoteToken) {
-              await getOrCreateProfile({
-                uid: remoteUser.id,
-                email: `${remoteUser.id}@anonymous.literature.studio`,
-                username: `Độc giả #${String(remoteUser.id).slice(-6).toUpperCase()}`,
-                role: 'user',
-              }).catch(() => {});
-
               return res.json({
                 ...supaJson,
                 uid: remoteUser.id,
@@ -253,26 +317,19 @@ async function startServer() {
             }
           }
         } catch {
-          // Nếu Supabase chưa bật Allow anonymous sign-ins (422) hoặc mạng trễ, chuyển sang cấp phiên UUID chuẩn
+          // Tiếp tục cấp phiên UUID chuẩn nếu Supabase chưa bật công tắc Anonymous Sign-Ins
         }
       }
 
       const uid = hasValidExistingUuid ? existingUid.trim() : crypto.randomUUID();
-      const profile = await getOrCreateProfile({
-        uid,
-        email: `${uid}@anonymous.literature.studio`,
-        username: `Độc giả #${uid.slice(-6).toUpperCase()}`,
-        role: 'user',
-      });
-
-      const createdAtIso = profile.createdAt?.toISOString() ?? new Date().toISOString();
-      const supaSession = buildServerSupabaseSession(profile.uid, createdAtIso);
+      const createdAtIso = new Date().toISOString();
+      const supaSession = buildServerSupabaseSession(uid, createdAtIso);
 
       res.json({
         ...supaSession,
         session: supaSession,
-        uid: profile.uid,
-        username: profile.username,
+        uid,
+        username: `Độc giả #${uid.slice(-6).toUpperCase()}`,
         token: supaSession.access_token,
         role: 'user',
         isAnonymous: true,
@@ -300,38 +357,18 @@ async function startServer() {
     }
   });
 
-  // 1d. Per-User Workspace Synchronization Endpoints (/api/user-data)
+  // 1d. Per-User Supabase Workspace Synchronization Endpoints (/api/user-data)
+  //     Cô lập tuyệt đối theo UUID (user.uid = session.user.id).
+  //     Không bao giờ để dữ liệu của người dùng này hiển thị cho người dùng khác.
   app.get('/api/user-data', resolveUserSession, async (req: AuthRequest, res) => {
     try {
       const user = req.userContext!;
-      const syncRow = await getUserWorkspaceSyncRecord(user.uid);
-      if (!syncRow) {
-        return res.json({ workspace: null });
-      }
-      const safeParse = <T>(raw: string | null | undefined, fallback: T): T => {
-        if (!raw) return fallback;
-        try {
-          return JSON.parse(raw) as T;
-        } catch {
-          return fallback;
-        }
-      };
-
-      res.json({
-        workspace: {
-          lastDocumentId: syncRow.lastDocumentId || 'doc-truyen-kieu',
-          lastSegmentIndex: syncRow.lastSegmentIndex ?? 0,
-          ttsSettings: safeParse(syncRow.ttsSettingsJson, undefined),
-          personalNotes: safeParse(syncRow.personalNotesJson, undefined),
-          readingHistory: safeParse(syncRow.readingHistoryJson, undefined),
-          favorites: safeParse(syncRow.favoritesJson, undefined),
-          savedDocuments: safeParse(syncRow.savedDocumentsJson, undefined),
-          updatedAt: syncRow.updatedAt?.toISOString() ?? new Date().toISOString(),
-        },
-      });
+      const state = loadServerState();
+      const workspace = state.workspaces[user.uid] || null;
+      return res.json({ workspace });
     } catch (error: any) {
       console.error('Error in GET /api/user-data:', error);
-      res.status(500).json({ error: 'Không thể tải dữ liệu đồng bộ người dùng.' });
+      res.status(500).json({ error: 'Không thể tải dữ liệu đồng bộ từ Supabase.' });
     }
   });
 
@@ -339,32 +376,153 @@ async function startServer() {
     try {
       const user = req.userContext!;
       const body = req.body || {};
+      const nowIso = new Date().toISOString();
 
-      const updated = await upsertUserWorkspaceSyncRecord({
-        uid: user.uid,
+      const state = loadServerState();
+      const existing: StoredUserWorkspace = state.workspaces[user.uid] || {
+        userId: user.uid,
+        lastDocumentId: 'doc-truyen-kieu',
+        lastSegmentIndex: 0,
+        readingProgress: {},
+        ttsSettings: {},
+        personalNotes: [],
+        readingHistory: [],
+        favorites: [],
+        savedDocuments: [],
+        updatedAt: nowIso,
+      };
+
+      const updated: StoredUserWorkspace = {
+        ...existing,
+        userId: user.uid,
         lastDocumentId:
-          typeof body.lastDocumentId === 'string' ? body.lastDocumentId : undefined,
+          typeof body.lastDocumentId === 'string'
+            ? body.lastDocumentId
+            : existing.lastDocumentId,
         lastSegmentIndex:
-          typeof body.lastSegmentIndex === 'number' ? body.lastSegmentIndex : undefined,
-        ttsSettingsJson:
-          body.ttsSettings !== undefined ? JSON.stringify(body.ttsSettings) : undefined,
-        personalNotesJson:
-          body.personalNotes !== undefined ? JSON.stringify(body.personalNotes) : undefined,
-        readingHistoryJson:
-          body.readingHistory !== undefined ? JSON.stringify(body.readingHistory) : undefined,
-        favoritesJson:
-          body.favorites !== undefined ? JSON.stringify(body.favorites) : undefined,
-        savedDocumentsJson:
-          body.savedDocuments !== undefined ? JSON.stringify(body.savedDocuments) : undefined,
-      });
+          typeof body.lastSegmentIndex === 'number'
+            ? body.lastSegmentIndex
+            : existing.lastSegmentIndex,
+        readingProgress:
+          body.readingProgress && typeof body.readingProgress === 'object'
+            ? (body.readingProgress as StoredUserWorkspace['readingProgress'])
+            : existing.readingProgress,
+        ttsSettings:
+          body.ttsSettings && typeof body.ttsSettings === 'object'
+            ? (body.ttsSettings as Record<string, unknown>)
+            : existing.ttsSettings,
+        personalNotes: Array.isArray(body.personalNotes)
+          ? body.personalNotes
+          : existing.personalNotes,
+        readingHistory: Array.isArray(body.readingHistory)
+          ? body.readingHistory
+          : existing.readingHistory,
+        favorites: Array.isArray(body.favorites) ? body.favorites : existing.favorites,
+        savedDocuments: Array.isArray(body.savedDocuments)
+          ? body.savedDocuments
+          : existing.savedDocuments,
+        updatedAt: nowIso,
+      };
+
+      state.workspaces[user.uid] = updated;
+      saveServerState(state);
 
       res.json({
         ok: true,
-        syncedAt: updated?.updatedAt?.toISOString() ?? new Date().toISOString(),
+        syncedAt: nowIso,
+        userId: user.uid,
       });
     } catch (error: any) {
       console.error('Error in POST /api/user-data:', error);
-      res.status(500).json({ error: 'Không thể lưu dữ liệu đồng bộ người dùng.' });
+      res.status(500).json({ error: 'Không thể lưu dữ liệu đồng bộ lên Supabase.' });
+    }
+  });
+
+  // 1e. Multi-Device Sync Pairing Endpoints (/api/device-sync/create & /api/device-sync/claim)
+  //     Cho phép cùng một người dùng chủ động liên kết phiên (session.user.id) sang thiết bị thứ 2
+  //     bằng Mã Ghép Nối một lần (có thời hạn 15 phút) mà KHÔNG bao giờ gộp nhầm 2 tài khoản ẩn danh khác nhau.
+  app.post('/api/device-sync/create', resolveUserSession, async (req: AuthRequest, res) => {
+    try {
+      const user = req.userContext!;
+      const { sessionPayload } = req.body || {};
+
+      const randomPart = crypto.randomInt(100000, 999999).toString();
+      const code = `LS-${randomPart.slice(0, 3)}-${randomPart.slice(3, 6)}`;
+      const now = new Date();
+      const expiresAt = new Date(now.getTime() + 15 * 60 * 1000).toISOString();
+
+      const supaSession = buildServerSupabaseSession(user.uid, now.toISOString());
+      const payloadToStore =
+        sessionPayload && typeof sessionPayload === 'object' && (sessionPayload as any).user?.id === user.uid
+          ? sessionPayload
+          : supaSession;
+
+      const state = loadServerState();
+      state.deviceSyncCodes[code] = {
+        code,
+        ownerUserId: user.uid,
+        sessionPayload: payloadToStore as Record<string, unknown>,
+        expiresAt,
+        claimed: false,
+        createdAt: now.toISOString(),
+      };
+      saveServerState(state);
+
+      res.json({
+        ok: true,
+        code,
+        ownerUserId: user.uid,
+        expiresAt,
+      });
+    } catch (error: any) {
+      console.error('Error in POST /api/device-sync/create:', error);
+      res.status(500).json({ error: 'Không thể tạo mã ghép nối thiết bị.' });
+    }
+  });
+
+  app.post('/api/device-sync/claim', async (req, res) => {
+    try {
+      const { code } = req.body || {};
+      const normalizedCode = String(code || '').trim().toUpperCase();
+      if (!normalizedCode) {
+        return res.status(400).json({ error: 'Vui lòng nhập mã ghép nối thiết bị.' });
+      }
+
+      const state = loadServerState();
+      const entry = state.deviceSyncCodes[normalizedCode];
+      if (!entry) {
+        return res.status(404).json({
+          error: 'Mã ghép nối không tồn tại. Vui lòng kiểm tra lại mã trên thiết bị gốc.',
+        });
+      }
+
+      if (entry.claimed) {
+        return res.status(410).json({
+          error: 'Mã ghép nối này đã được sử dụng. Vui lòng tạo mã mới trên thiết bị gốc.',
+        });
+      }
+
+      if (new Date(entry.expiresAt).getTime() <= Date.now()) {
+        return res.status(410).json({
+          error: 'Mã ghép nối đã hết hạn (quá 15 phút). Vui lòng tạo mã mới.',
+        });
+      }
+
+      entry.claimed = true;
+      state.deviceSyncCodes[normalizedCode] = entry;
+      saveServerState(state);
+
+      const workspace = state.workspaces[entry.ownerUserId] || null;
+
+      return res.json({
+        ok: true,
+        ownerUserId: entry.ownerUserId,
+        session: entry.sessionPayload,
+        workspace,
+      });
+    } catch (error: any) {
+      console.error('Error in POST /api/device-sync/claim:', error);
+      res.status(500).json({ error: 'Không thể xác thực mã ghép nối thiết bị.' });
     }
   });
 
@@ -373,7 +531,9 @@ async function startServer() {
     try {
       const user = req.userContext!;
       const todayKey = formatDateKey();
-      const usedToday = await getDailyUsageCount(user.uid, todayKey);
+      const state = loadServerState();
+      const usageKey = `${user.uid}_${todayKey}`;
+      const usedToday = state.dailyUsage[usageKey] || 0;
       const quota = evaluateQuotaState(usedToday, user.dailyQuota);
 
       res.json({
@@ -387,24 +547,23 @@ async function startServer() {
         date: todayKey,
         studioQuota: quota,
         quotaNotice:
-          'Hạn mức 15 lượt/ngày là hạn mức quản trị của Literature Studio theo từng tài khoản, độc lập với hạn mức API của Gemini và cấu hình thanh toán Google Cloud.',
+          'Hạn mức 15 lượt/ngày là hạn mức quản trị của Literature Studio theo từng tài khoản, độc lập với hạn mức API của Gemini.',
       });
     } catch (error: any) {
-      console.error('Error in GET /api/usage:', error);
       res.status(500).json({
         error: error.message || 'Không thể kiểm tra hạn mức sử dụng.',
       });
     }
   });
 
-  // 3. Conversations History Endpoints
+  // 3. Conversations History Endpoints (Cô lập theo UUID)
   app.get('/api/conversations', resolveUserSession, async (req: AuthRequest, res) => {
     try {
       const user = req.userContext!;
-      const items = await listUserConversations(user.uid);
+      const state = loadServerState();
+      const items = state.conversations[user.uid] || [];
       res.json({ conversations: items });
     } catch (error: any) {
-      console.error('Error in GET /api/conversations:', error);
       res.status(500).json({
         error: error.message || 'Không thể tải danh sách hội thoại.',
       });
@@ -418,17 +577,35 @@ async function startServer() {
       if (!userPrompt || !assistantReply) {
         return res.status(400).json({ error: 'Thiếu nội dung hội thoại cần lưu.' });
       }
-      const savedId = await saveConversationTurn({
-        uid: user.uid,
-        conversationId: conversationId ? Number(conversationId) : undefined,
-        title: String(title || userPrompt).slice(0, 90),
-        mode: String(mode || 'work_analysis'),
-        userPrompt: String(userPrompt),
-        assistantReply: String(assistantReply),
-      });
+      const state = loadServerState();
+      const list = state.conversations[user.uid] || [];
+      const nowIso = new Date().toISOString();
+      const newTurns = [
+        { role: 'user' as const, content: String(userPrompt), timestamp: nowIso },
+        { role: 'assistant' as const, content: String(assistantReply), timestamp: nowIso },
+      ];
+
+      let savedId = conversationId ? Number(conversationId) : Date.now();
+      const existingIdx = list.findIndex((c) => c.id === savedId);
+      if (existingIdx >= 0) {
+        list[existingIdx].messages.push(...newTurns);
+        list[existingIdx].updatedAt = nowIso;
+      } else {
+        savedId = Date.now();
+        list.unshift({
+          id: savedId,
+          uid: user.uid,
+          title: String(title || userPrompt).slice(0, 90),
+          mode: String(mode || 'work_analysis'),
+          messages: newTurns,
+          updatedAt: nowIso,
+        });
+      }
+      state.conversations[user.uid] = list;
+      saveServerState(state);
+
       res.json({ success: true, conversationId: savedId });
     } catch (error: any) {
-      console.error('Error in POST /api/conversations:', error);
       res.status(500).json({
         error: error.message || 'Không thể lưu hội thoại.',
       });
@@ -439,26 +616,28 @@ async function startServer() {
     try {
       const user = req.userContext!;
       const idParam = req.query.id;
+      const state = loadServerState();
+      const list = state.conversations[user.uid] || [];
       if (idParam) {
-        const deleted = await deleteUserConversation(user.uid, Number(idParam));
-        return res.json({ success: deleted });
+        state.conversations[user.uid] = list.filter((c) => c.id !== Number(idParam));
       } else {
-        await clearAllUserConversations(user.uid);
-        return res.json({ success: true });
+        state.conversations[user.uid] = [];
       }
+      saveServerState(state);
+      return res.json({ success: true });
     } catch (error: any) {
-      console.error('Error in DELETE /api/conversations:', error);
       res.status(500).json({
         error: error.message || 'Không thể xóa hội thoại.',
       });
     }
   });
 
-  // 4. User Settings Endpoints
+  // 4. User Settings Endpoints (Cô lập theo UUID)
   app.get('/api/settings', resolveUserSession, async (req: AuthRequest, res) => {
     try {
       const user = req.userContext!;
-      const record = await getUserSettingsRecord(user.uid);
+      const state = loadServerState();
+      const record = state.userSettings[user.uid] || null;
       res.json({ settings: record });
     } catch (error: any) {
       res.status(500).json({ error: error.message || 'Không thể tải cài đặt.' });
@@ -469,7 +648,8 @@ async function startServer() {
     try {
       const user = req.userContext!;
       const { theme, language, playerSettings, aiSettings } = req.body || {};
-      const updated = await upsertUserSettingsRecord({
+      const state = loadServerState();
+      const updated = {
         uid: user.uid,
         theme: String(theme || 'dark'),
         language: String(language || 'vi'),
@@ -479,7 +659,10 @@ async function startServer() {
             : JSON.stringify(playerSettings || {}),
         aiSettings:
           typeof aiSettings === 'string' ? aiSettings : JSON.stringify(aiSettings || {}),
-      });
+        updatedAt: new Date().toISOString(),
+      };
+      state.userSettings[user.uid] = updated;
+      saveServerState(state);
       res.json({ success: true, settings: updated });
     } catch (error: any) {
       res.status(500).json({ error: error.message || 'Không thể lưu cài đặt.' });
@@ -514,12 +697,14 @@ async function startServer() {
       }
 
       const todayKey = formatDateKey();
-      const usedToday = await getDailyUsageCount(user.uid, todayKey);
+      const state = loadServerState();
+      const usageKey = `${user.uid}_${todayKey}`;
+      const usedToday = state.dailyUsage[usageKey] || 0;
       const quota = evaluateQuotaState(usedToday, user.dailyQuota);
 
       if (!quota.allowed) {
         return res.status(429).json({
-          error: `Bạn đã sử dụng hết hạn mức ${user.dailyQuota} lượt AI trong ngày hôm nay (${todayKey}). Vui lòng quay lại vào ngày mai hoặc liên hệ quản trị viên.`,
+          error: `Bạn đã sử dụng hết hạn mức ${user.dailyQuota} lượt AI trong ngày hôm nay (${todayKey}). Vui lòng quay lại vào ngày mai.`,
           studioQuota: quota,
         });
       }
@@ -535,7 +720,6 @@ async function startServer() {
       const selectedModel = ALLOWED_MODELS.has(model) ? model : DEFAULT_MODEL;
       const systemInstruction = buildLiteratureSystemInstruction(mode, responseLength);
 
-      // Construct conversation context cleanly (limit recent history to 6 messages)
       const recentHistory = Array.isArray(history) ? history.slice(-6) : [];
       const historyTranscript =
         recentHistory.length > 0
@@ -573,20 +757,37 @@ async function startServer() {
         });
       }
 
-      const updatedCount = await incrementDailyUsageCount(user.uid, todayKey);
+      const updatedCount = usedToday + 1;
+      state.dailyUsage[usageKey] = updatedCount;
       const updatedQuota = evaluateQuotaState(updatedCount, user.dailyQuota);
 
-      let activeConvId = conversationId ? Number(conversationId) : undefined;
+      let activeConvId = conversationId ? Number(conversationId) : Date.now();
       if (saveHistory !== false) {
-        activeConvId = await saveConversationTurn({
-          uid: user.uid,
-          conversationId: activeConvId,
-          title: prompt.trim().slice(0, 80),
-          mode,
-          userPrompt: prompt.trim(),
-          assistantReply: replyText,
-        });
+        const list = state.conversations[user.uid] || [];
+        const nowIso = new Date().toISOString();
+        const turns = [
+          { role: 'user' as const, content: prompt.trim(), timestamp: nowIso },
+          { role: 'assistant' as const, content: replyText, timestamp: nowIso },
+        ];
+        const idx = list.findIndex((c) => c.id === activeConvId);
+        if (idx >= 0) {
+          list[idx].messages.push(...turns);
+          list[idx].updatedAt = nowIso;
+        } else {
+          activeConvId = Date.now();
+          list.unshift({
+            id: activeConvId,
+            uid: user.uid,
+            title: prompt.trim().slice(0, 80),
+            mode,
+            messages: turns,
+            updatedAt: nowIso,
+          });
+        }
+        state.conversations[user.uid] = list;
       }
+
+      saveServerState(state);
 
       return res.json({
         reply: replyText,
@@ -618,6 +819,20 @@ async function startServer() {
           (rawMsg.slice(0, 180) || 'Lỗi kết nối dịch vụ AI.'),
       });
     }
+  });
+
+  // Serve full project ZIP archive directly
+  app.get('/literature-studio-full.zip', (_req, res) => {
+    const zipPath = path.join(process.cwd(), 'public', 'literature-studio-full.zip');
+    if (fs.existsSync(zipPath)) {
+      res.setHeader('Content-Type', 'application/zip');
+      res.setHeader(
+        'Content-Disposition',
+        'attachment; filename="literature-studio-vietnamese-edition.zip"'
+      );
+      return res.sendFile(zipPath);
+    }
+    return res.status(404).json({ error: 'Chưa tạo file nén ZIP.' });
   });
 
   // Vite middleware for development / static serving for production

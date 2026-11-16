@@ -1,17 +1,17 @@
 import type { Session } from '@supabase/supabase-js';
 import {
   supabase,
-  isSupabaseConfigured,
   isValidUUID,
   generateUUIDv4,
   buildAnonymousSupabaseSession,
+  savePersistedFallbackSession,
   SUPABASE_AUTH_STORAGE_KEY,
 } from './supabase';
 
 export interface AnonymousUserSession {
   uid: string;
   token: string;
-  provider: 'supabase-anonymous' | 'cloudsql-anonymous';
+  provider: 'supabase-anonymous';
   createdAt: string;
   isAnonymous: boolean;
   role: 'user';
@@ -23,10 +23,6 @@ export interface AnonymousUserSession {
 const LOCAL_SESSION_STORAGE_KEY = 'literature_studio_anon_session_v2';
 const SUPABASE_TIMEOUT_MS = 8000;
 
-/**
- * Bọc lời gọi bất đồng bộ với bộ giới hạn thời gian (timeout)
- * để xử lý trường hợp mất mạng hoặc Supabase không phản hồi.
- */
 export async function withNetworkTimeout<T>(
   promise: Promise<T>,
   timeoutMs: number = SUPABASE_TIMEOUT_MS,
@@ -48,19 +44,14 @@ export async function withNetworkTimeout<T>(
   }
 }
 
-function toAnonymousUserSession(
-  session: Session,
-  provider: 'supabase-anonymous' | 'cloudsql-anonymous'
-): AnonymousUserSession {
-  // Yêu cầu 5: Lấy UUID của người dùng từ session.user.id
+function toAnonymousUserSession(session: Session): AnonymousUserSession {
   const userUuid = session.user.id;
   return {
     uid: userUuid,
     token: session.access_token || `anon_tok_${userUuid}`,
-    provider,
+    provider: 'supabase-anonymous',
     createdAt: session.user.created_at || new Date().toISOString(),
     isAnonymous: true,
-    // Yêu cầu 9: Không cấp quyền Admin hoặc Teacher cho tài khoản ẩn danh
     role: 'user',
     canAccessAdmin: false,
     canAccessTeacher: false,
@@ -79,10 +70,7 @@ export function loadCachedSession(): AnonymousUserSession | null {
           parsed.createdAt,
           parsed.token
         );
-        return toAnonymousUserSession(
-          reconstructed,
-          parsed.provider === 'supabase-anonymous' ? 'supabase-anonymous' : 'cloudsql-anonymous'
-        );
+        return toAnonymousUserSession(reconstructed);
       }
     }
 
@@ -96,10 +84,7 @@ export function loadCachedSession(): AnonymousUserSession | null {
           parsedSupa?.user?.created_at,
           parsedSupa?.access_token
         );
-        return toAnonymousUserSession(
-          reconstructed,
-          isSupabaseConfigured ? 'supabase-anonymous' : 'cloudsql-anonymous'
-        );
+        return toAnonymousUserSession(reconstructed);
       }
     }
   } catch {
@@ -108,32 +93,43 @@ export function loadCachedSession(): AnonymousUserSession | null {
   return null;
 }
 
-function saveCachedSession(anonSession: AnonymousUserSession): void {
+export function saveCachedSession(anonSession: AnonymousUserSession): void {
   try {
     localStorage.setItem(
       LOCAL_SESSION_STORAGE_KEY,
       JSON.stringify({
         uid: anonSession.uid,
         token: anonSession.token,
-        provider: anonSession.provider,
+        provider: 'supabase-anonymous',
         createdAt: anonSession.createdAt,
         isAnonymous: true,
         role: 'user',
       })
     );
+    savePersistedFallbackSession(anonSession.session);
   } catch {
     // Bỏ qua lỗi bộ nhớ đầy
   }
 }
 
 /**
- * Tự động khởi tạo hoặc khôi phục phiên đăng nhập ẩn danh qua Supabase Auth:
- * 1. Gọi `supabase.auth.getSession()` để kiểm tra phiên hợp lệ hiện có.
- * 2. Nếu đã có phiên hợp lệ, giữ nguyên phiên hiện tại (không tạo tài khoản mới khi tải lại trang).
- * 3. Nếu chưa có phiên, tự động gọi `supabase.auth.signInAnonymously()`.
- * 4. Lấy UUID người dùng trực tiếp từ `session.user.id`.
- * 5. Đồng bộ hồ sơ người dùng ẩn danh với máy chủ để lưu trữ dữ liệu theo UUID.
+ * Chuyển đổi phiên hiện tại trên thiết bị này sang phiên của cùng một người dùng từ thiết bị khác
+ * (thông qua Mã Ghép Nối Đa Thiết Bị hoặc Khóa Phiên Đa Thiết Bị).
  */
+export async function applyLinkedDeviceSession(targetSession: Session): Promise<AnonymousUserSession> {
+  const anon = toAnonymousUserSession(targetSession);
+  saveCachedSession(anon);
+  try {
+    await supabase.auth.setSession({
+      access_token: targetSession.access_token,
+      refresh_token: targetSession.refresh_token || `refresh_${targetSession.user.id}`,
+    });
+  } catch {
+    // Đã lưu trực tiếp vào storage của Supabase Auth
+  }
+  return anon;
+}
+
 export async function ensureAnonymousSession(options?: {
   throwOnNetworkError?: boolean;
 }): Promise<AnonymousUserSession> {
@@ -146,7 +142,6 @@ export async function ensureAnonymousSession(options?: {
   }
 
   try {
-    // Bước 1: Kiểm tra phiên đăng nhập hợp lệ hiện có trong Supabase Auth
     const { data: sessionData, error: sessionError } = await withNetworkTimeout(
       supabase.auth.getSession(),
       SUPABASE_TIMEOUT_MS,
@@ -158,18 +153,11 @@ export async function ensureAnonymousSession(options?: {
     }
 
     if (sessionData?.session?.user?.id) {
-      const existingSession = sessionData.session;
-      const activeAnon = toAnonymousUserSession(
-        existingSession,
-        isSupabaseConfigured ? 'supabase-anonymous' : 'cloudsql-anonymous'
-      );
-      saveCachedSession(activeAnon);
-      // Đồng bộ ngầm với backend để đảm bảo UUID tồn tại trong hồ sơ
-      syncUuidWithBackend(existingSession.user.id, existingSession.access_token).catch(() => {});
-      return activeAnon;
+      const existingAnon = toAnonymousUserSession(sessionData.session);
+      saveCachedSession(existingAnon);
+      return existingAnon;
     }
 
-    // Bước 2: Lần đầu mở website -> tự động gọi supabase.auth.signInAnonymously()
     const { data: signInData, error: signInError } = await withNetworkTimeout(
       supabase.auth.signInAnonymously(),
       SUPABASE_TIMEOUT_MS,
@@ -181,13 +169,8 @@ export async function ensureAnonymousSession(options?: {
     }
 
     if (signInData?.session?.user?.id) {
-      const createdSession = signInData.session;
-      const createdAnon = toAnonymousUserSession(
-        createdSession,
-        isSupabaseConfigured ? 'supabase-anonymous' : 'cloudsql-anonymous'
-      );
+      const createdAnon = toAnonymousUserSession(signInData.session);
       saveCachedSession(createdAnon);
-      syncUuidWithBackend(createdSession.user.id, createdSession.access_token).catch(() => {});
       return createdAnon;
     }
 
@@ -199,8 +182,6 @@ export async function ensureAnonymousSession(options?: {
         : new Error('Lỗi kết nối tới dịch vụ xác thực Supabase.');
     }
 
-    // Dự phòng an toàn khi mạng lỗi hoặc Supabase không phản hồi:
-    // ưu tiên giữ nguyên phiên đã lưu trong trình duyệt để không mất dữ liệu
     const cached = loadCachedSession();
     if (cached) {
       return cached;
@@ -208,24 +189,9 @@ export async function ensureAnonymousSession(options?: {
 
     const fallbackUuid = generateUUIDv4();
     const fallbackSupaSession = buildAnonymousSupabaseSession(fallbackUuid);
-    const fallbackAnon = toAnonymousUserSession(fallbackSupaSession, 'cloudsql-anonymous');
+    const fallbackAnon = toAnonymousUserSession(fallbackSupaSession);
     saveCachedSession(fallbackAnon);
     return fallbackAnon;
-  }
-}
-
-async function syncUuidWithBackend(uuid: string, token: string): Promise<void> {
-  try {
-    await fetch('/api/auth/anonymous', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        existingUid: uuid,
-        existingToken: token,
-      }),
-    });
-  } catch {
-    // Bỏ qua lỗi mạng nền
   }
 }
 

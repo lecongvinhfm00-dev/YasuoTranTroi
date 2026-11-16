@@ -5,49 +5,56 @@ import {
   isSupabaseConfigured,
   isValidUUID,
   sanitizeAnonymousRole,
+  encodeMultiDeviceSyncKey,
 } from '../lib/supabase';
 import {
+  applyLinkedDeviceSession,
   ensureAnonymousSession,
   loadCachedSession,
   withNetworkTimeout,
 } from '../lib/anonymousAuth';
+import {
+  claimMultiDevicePairingCode,
+  createMultiDevicePairingCode,
+  type UserWorkspaceBundle,
+} from '../lib/userData';
 import { setMemoryAuthToken } from '../services/apiClient';
 
 export type AuthConnectionStatus = 'initializing' | 'authenticated' | 'error';
 
 export interface AuthContextValue {
-  /** Trạng thái kết nối xác thực: đang khởi tạo | đã đăng nhập | lỗi kết nối */
   status: AuthConnectionStatus;
-  /** Phiên Supabase Auth hiện tại */
   session: Session | null;
-  /** Đối tượng người dùng Supabase Auth */
   user: User | null;
-  /** UUID của người dùng lấy trực tiếp từ session.user.id */
   userId: string | null;
-  /** Tên hiển thị mặc định của độc giả ẩn danh */
   displayName: string;
-  /** Tài khoản ẩn danh luôn có isAnonymous = true */
   isAnonymous: boolean;
-  /** Vai trò bảo mật: luôn khóa ở 'user', không bao giờ cấp quyền 'admin' hoặc 'teacher' cho tài khoản ẩn danh */
   role: 'user';
   canAccessAdmin: false;
   canAccessTeacher: false;
-  /** Thông báo lỗi khi mất mạng hoặc Supabase không phản hồi */
   error: string | null;
-  /** Cho biết biến môi trường Supabase đã được cấu hình trực tiếp hay đang dùng cơ chế dự phòng */
   isSupabaseConfigured: boolean;
-  /** Thử kết nối và khởi tạo lại phiên đăng nhập ẩn danh */
+  multiDeviceSyncKey: string;
   retryAuth: () => Promise<void>;
-  /** Cho phép kiểm tra trạng thái lỗi kết nối mạng và khôi phục */
   triggerConnectionErrorTest: () => void;
+  generateDevicePairingCode: () => Promise<{
+    ok: boolean;
+    code?: string;
+    expiresAt?: string;
+    error?: string;
+  }>;
+  linkWithDeviceCode: (
+    codeOrKey: string
+  ) => Promise<{
+    ok: boolean;
+    newUserId?: string;
+    workspace?: Partial<UserWorkspaceBundle> | null;
+    error?: string;
+  }>;
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
-/**
- * Đồng bộ hồ sơ người dùng ẩn danh vào bảng `public.profiles` trên Supabase.
- * Tuyệt đối không gửi hoặc nâng quyền `role` thành `admin` hoặc `teacher`.
- */
 async function syncSupabaseUserProfile(session: Session): Promise<void> {
   if (!isSupabaseConfigured || !session?.user?.id) return;
   const userUuid = session.user.id;
@@ -72,7 +79,7 @@ async function syncSupabaseUserProfile(session: Session): Promise<void> {
       'Quá thời gian đồng bộ bảng profiles'
     );
   } catch {
-    // Không chặn luồng đăng nhập nếu bảng profiles chưa chạy migration
+    // Bỏ qua nếu bảng profiles chưa khởi tạo
   }
 }
 
@@ -84,7 +91,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [error, setError] = useState<string | null>(null);
 
   const applyAuthenticatedSession = useCallback((activeSession: Session) => {
-    // Yêu cầu 5: Lấy UUID của người dùng từ session.user.id
     const uuid = activeSession.user.id;
     setSession(activeSession);
     setUser(activeSession.user);
@@ -100,14 +106,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setError(null);
 
       try {
-        // Kiểm tra kết nối mạng trình duyệt
         if (typeof navigator !== 'undefined' && navigator.onLine === false) {
           throw new Error(
-            'Mất kết nối mạng Internet. Không thể kết nối tới máy chủ xác thực Supabase.'
+            'Mất kết nối mạng Internet. Đang sử dụng hàng đợi ngoại tuyến và sẽ tự động đồng bộ lại khi có mạng.'
           );
         }
 
-        // Bước 1: Kiểm tra phiên đăng nhập hợp lệ hiện có (Yêu cầu 2 & 3: giữ nguyên phiên hiện tại, không tạo mới khi tải lại trang)
         const { data: currentSessionData, error: getSessionError } = await withNetworkTimeout(
           supabase.auth.getSession(),
           8000,
@@ -124,7 +128,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           return;
         }
 
-        // Bước 2: Khi người dùng lần đầu mở website, tự động gọi supabase.auth.signInAnonymously() (Yêu cầu 1)
         const { data: signInData, error: signInError } = await withNetworkTimeout(
           supabase.auth.signInAnonymously(),
           8000,
@@ -141,7 +144,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           return;
         }
 
-        // Dự phòng qua ensureAnonymousSession nếu cần
         const anonResult = await ensureAnonymousSession({
           throwOnNetworkError: strictNetworkCheck,
         });
@@ -152,7 +154,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             ? err.message
             : 'Không thể kết nối tới dịch vụ Supabase Anonymous Auth.';
 
-        // Giữ phiên đã lưu trong bộ nhớ cục bộ (nếu có) để không làm mất giao diện hoặc chức năng hiện tại (Yêu cầu 10 & 11)
         const cached = loadCachedSession();
         if (cached?.session?.user?.id && isValidUUID(cached.session.user.id)) {
           setSession(cached.session);
@@ -173,7 +174,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     initializeAnonymousAuth(false);
 
-    // Yêu cầu 4: Duy trì phiên đăng nhập bằng Supabase Auth (onAuthStateChange)
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_event, nextSession) => {
@@ -183,15 +183,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
     });
 
-    // Lắng nghe sự kiện mạng khôi phục hoặc mất kết nối
     const handleOnline = () => {
-      if (mounted && status === 'error') {
+      if (mounted) {
         initializeAnonymousAuth(false);
       }
     };
     const handleOffline = () => {
       if (mounted) {
-        setError('Thiết bị vừa mất kết nối mạng. Đang duy trì chế độ ngoại tuyến tạm thời.');
+        setError('Thiết bị vừa mất kết nối mạng. Dữ liệu thay đổi sẽ được lưu chờ đồng bộ lại.');
         setStatus('error');
       }
     };
@@ -222,11 +221,50 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setStatus('error');
   }, []);
 
-  // Yêu cầu 9: Không cấp quyền Admin hoặc Teacher cho tài khoản ẩn danh
+  const generateDevicePairingCode = useCallback(async () => {
+    let activeUserId = userId;
+    let activeSession = session;
+    if (!activeUserId || !activeSession) {
+      try {
+        const result = await ensureAnonymousSession();
+        applyAuthenticatedSession(result.session);
+        activeUserId = result.uid;
+        activeSession = result.session;
+      } catch (err: any) {
+        return { ok: false, error: err?.message || 'Phiên đăng nhập chưa sẵn sàng.' };
+      }
+    }
+    return createMultiDevicePairingCode(activeUserId, activeSession.access_token, activeSession);
+  }, [userId, session, applyAuthenticatedSession]);
+
+  const linkWithDeviceCode = useCallback(
+    async (codeOrKey: string) => {
+      const claimResult = await claimMultiDevicePairingCode(codeOrKey);
+      if (!claimResult.ok || !claimResult.session) {
+        return {
+          ok: false,
+          error: claimResult.error || 'Không thể liên kết thiết bị.',
+        };
+      }
+
+      const applied = await applyLinkedDeviceSession(claimResult.session);
+      applyAuthenticatedSession(applied.session);
+      syncSupabaseUserProfile(applied.session).catch(() => {});
+
+      return {
+        ok: true,
+        newUserId: applied.uid,
+        workspace: claimResult.workspace || null,
+      };
+    },
+    [applyAuthenticatedSession]
+  );
+
   const safeRole = sanitizeAnonymousRole(user?.role);
   const displayName = userId
     ? `Độc giả #${userId.slice(-6).toUpperCase()}`
     : 'Độc giả Ẩn danh';
+  const multiDeviceSyncKey = session ? encodeMultiDeviceSyncKey(session) : '';
 
   const value: AuthContextValue = {
     status,
@@ -240,8 +278,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     canAccessTeacher: false,
     error,
     isSupabaseConfigured,
+    multiDeviceSyncKey,
     retryAuth,
     triggerConnectionErrorTest,
+    generateDevicePairingCode,
+    linkWithDeviceCode,
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

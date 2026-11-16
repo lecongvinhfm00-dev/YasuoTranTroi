@@ -1,4 +1,11 @@
-import { supabase, isSupabaseConfigured, isValidUUID } from './supabase';
+import type { Session } from '@supabase/supabase-js';
+import {
+  supabase,
+  isSupabaseConfigured,
+  isValidUUID,
+  buildAnonymousSupabaseSession,
+  decodeMultiDeviceSyncKey,
+} from './supabase';
 import type {
   LiteratureDocument,
   PersonalNoteItem,
@@ -9,89 +16,21 @@ import type {
 } from '../types/studio';
 
 // ============================================================================
-// ĐỊNH NGHĨA KIỂU DỮ LIỆU ĐỐI CHIẾU CHÍNH XÁC VỚI 9 BẢNG TRONG SUPABASE SCHEMA
-// (supabase/migrations/001_initial_schema.sql)
+// ĐỊNH NGHĨA KIỂU DỮ LIỆU ĐỒNG BỘ SUPABASE POSTGRESQL ĐA THIẾT BỊ
 // ============================================================================
 
-export interface SupabaseProfileRow {
-  id: string; // UUID liên kết auth.users(id)
-  display_name: string;
-  avatar_url: string | null;
-  role: 'user' | 'teacher' | 'admin';
-  created_at: string;
-  updated_at: string;
-}
-
-export interface SupabaseAuthorRow {
-  id: string;
-  name: string;
-  biography: string | null;
-  avatar_url: string | null;
-}
-
-export interface SupabaseCategoryRow {
-  id: string;
-  name: string;
-  description: string | null;
-}
-
-export interface SupabaseWorkRow {
-  id: string;
-  title: string;
-  author_id: string | null;
-  category_id: string | null;
-  description: string | null;
-  content: string;
-  cover_image: string | null;
-  published: boolean;
-  created_at: string;
-  authors?: SupabaseAuthorRow | null;
-  categories?: SupabaseCategoryRow | null;
-}
-
-export interface SupabaseReadingHistoryRow {
-  id: string;
-  user_id: string;
-  work_id: string;
-  last_read_at: string;
-}
-
-export interface SupabaseReadingProgressRow {
-  id: string;
-  user_id: string;
-  work_id: string;
-  progress: number;
-  updated_at: string;
-}
-
-export interface SupabaseFavoriteRow {
-  id: string;
-  user_id: string;
-  work_id: string;
-  created_at: string;
-}
-
-export interface SupabaseLessonRow {
-  id: string;
-  title: string;
-  description: string | null;
-  content: string;
-  teacher_id: string;
-  created_at: string;
-}
-
-export interface SupabaseMaterialRow {
-  id: string;
-  title: string;
-  description: string | null;
-  file_url: string;
-  teacher_id: string;
-  created_at: string;
+export interface ReadingProgressMapItem {
+  documentId: string;
+  segmentIndex: number;
+  totalSegments: number;
+  progressPercent: number;
+  updatedAt: string;
 }
 
 export interface UserWorkspaceBundle {
   lastDocumentId: string;
   lastSegmentIndex: number;
+  readingProgress: Record<string, ReadingProgressMapItem>;
   ttsSettings: TTSSettingsConfig;
   personalNotes: PersonalNoteItem[];
   readingHistory: ReadingHistoryItem[];
@@ -102,9 +41,11 @@ export interface UserWorkspaceBundle {
   updatedAt?: string;
 }
 
-const LOCAL_WORKSPACE_CACHE_PREFIX = 'literature_studio_workspace_v2_';
+const LOCAL_WORKSPACE_CACHE_PREFIX = 'literature_studio_workspace_v3_';
+const OFFLINE_QUEUE_PREFIX = 'literature_studio_offline_queue_v3_';
 
 export function loadLocalWorkspaceCache(uid: string): Partial<UserWorkspaceBundle> | null {
+  if (!isValidUUID(uid)) return null;
   try {
     const raw = localStorage.getItem(`${LOCAL_WORKSPACE_CACHE_PREFIX}${uid}`);
     if (!raw) return null;
@@ -115,174 +56,243 @@ export function loadLocalWorkspaceCache(uid: string): Partial<UserWorkspaceBundl
 }
 
 export function saveLocalWorkspaceCache(uid: string, bundle: Partial<UserWorkspaceBundle>): void {
+  if (!isValidUUID(uid)) return;
   try {
     const existing = loadLocalWorkspaceCache(uid) || {};
-    const merged = {
+    const merged: Partial<UserWorkspaceBundle> = {
       ...existing,
       ...bundle,
-      updatedAt: new Date().toISOString(),
+      readingProgress: {
+        ...(existing.readingProgress || {}),
+        ...(bundle.readingProgress || {}),
+      },
+      updatedAt: bundle.updatedAt || new Date().toISOString(),
     };
     localStorage.setItem(`${LOCAL_WORKSPACE_CACHE_PREFIX}${uid}`, JSON.stringify(merged));
   } catch {
-    // Bỏ qua lỗi hạn mức localStorage
+    // Bỏ qua lỗi vượt hạn mức localStorage
   }
 }
 
-// ============================================================================
-// CÁC HÀM TRUY VẤN TƯƠNG THÍCH VỚI 9 BẢNG TRÊN SUPABASE POSTGRESQL
-// ============================================================================
-
 /**
- * 1. Truy vấn hồ sơ người dùng từ bảng `public.profiles` theo UUID (`session.user.id`).
- *    Đảm bảo tài khoản ẩn danh luôn chỉ có role = 'user'.
+ * Lưu thay đổi vào hàng đợi ngoại tuyến (Offline Queue) theo đúng UUID người dùng
+ * khi mất mạng hoặc khi chưa thể kết nối tới Supabase.
  */
-export async function fetchMySupabaseProfile(userId: string): Promise<SupabaseProfileRow | null> {
-  if (!isSupabaseConfigured || !isValidUUID(userId)) return null;
+export function enqueueOfflineSyncPatch(
+  uid: string,
+  patch: Partial<UserWorkspaceBundle>
+): void {
+  if (!isValidUUID(uid)) return;
   try {
-    const { data, error } = await supabase
-      .from('profiles')
-      .select('id, display_name, avatar_url, role, created_at, updated_at')
-      .eq('id', userId)
-      .maybeSingle();
+    const existingRaw = localStorage.getItem(`${OFFLINE_QUEUE_PREFIX}${uid}`);
+    const existing: Partial<UserWorkspaceBundle> = existingRaw ? JSON.parse(existingRaw) : {};
+    const merged: Partial<UserWorkspaceBundle> = {
+      ...existing,
+      ...patch,
+      readingProgress: {
+        ...(existing.readingProgress || {}),
+        ...(patch.readingProgress || {}),
+      },
+      updatedAt: new Date().toISOString(),
+    };
+    localStorage.setItem(`${OFFLINE_QUEUE_PREFIX}${uid}`, JSON.stringify(merged));
+  } catch {
+    // Bỏ qua lỗi localStorage
+  }
+}
 
-    if (error || !data) return null;
-    return data as SupabaseProfileRow;
+export function getOfflineSyncQueue(uid: string): Partial<UserWorkspaceBundle> | null {
+  if (!isValidUUID(uid)) return null;
+  try {
+    const raw = localStorage.getItem(`${OFFLINE_QUEUE_PREFIX}${uid}`);
+    if (!raw) return null;
+    return JSON.parse(raw) as Partial<UserWorkspaceBundle>;
   } catch {
     return null;
   }
 }
 
-/**
- * 2. Lấy danh sách các tác phẩm đã xuất bản (`published = true`) từ bảng `public.works`
- *    kèm thông tin tác giả (`public.authors`) và thể loại (`public.categories`).
- */
-export async function fetchPublishedWorksFromSupabase(): Promise<SupabaseWorkRow[]> {
-  if (!isSupabaseConfigured) return [];
+export function clearOfflineSyncQueue(uid: string): void {
+  if (!isValidUUID(uid)) return;
   try {
-    const { data, error } = await supabase
-      .from('works')
-      .select(
-        'id, title, author_id, category_id, description, content, cover_image, published, created_at, authors(id, name, biography, avatar_url), categories(id, name, description)'
-      )
-      .eq('published', true)
-      .order('created_at', { ascending: false });
-
-    if (error || !Array.isArray(data)) return [];
-    return data as unknown as SupabaseWorkRow[];
+    localStorage.removeItem(`${OFFLINE_QUEUE_PREFIX}${uid}`);
   } catch {
-    return [];
+    // Bỏ qua
   }
 }
 
-/**
- * 3. Cập nhật lịch sử đọc (`public.reading_history`) và tiến độ đọc (`public.reading_progress`)
- *    của người dùng hiện tại (`user_id = session.user.id`) khi work_id là UUID.
- */
-export async function syncReadingProgressToSupabaseTables(
-  userId: string,
-  workId: string,
-  progressPercent: number
+export function hasPendingOfflineSync(uid: string): boolean {
+  return Boolean(getOfflineSyncQueue(uid));
+}
+
+// ============================================================================
+// ĐỒNG BỘ 6 NHÓM DỮ LIỆU LÊN CÁC BẢNG CHUẨN CỦA SUPABASE POSTGRESQL
+// (reading_history, reading_progress, personal_notes, favorites, saved_documents, user_tts_settings, user_workspace_sync)
+// ============================================================================
+
+async function syncNormalizedSupabaseTables(
+  uid: string,
+  bundle: Partial<UserWorkspaceBundle>
 ): Promise<void> {
-  if (!isSupabaseConfigured || !isValidUUID(userId) || !isValidUUID(workId)) return;
+  if (!isSupabaseConfigured || !isValidUUID(uid)) return;
   const nowIso = new Date().toISOString();
-  const clampedProgress = Math.max(0, Math.min(100, Number(progressPercent.toFixed(2))));
+  const tasks: Promise<unknown>[] = [];
 
-  try {
-    await Promise.all([
-      supabase.from('reading_history').upsert(
-        {
-          user_id: userId,
-          work_id: workId,
-          last_read_at: nowIso,
-        },
-        { onConflict: 'user_id,work_id' }
-      ),
-      supabase.from('reading_progress').upsert(
-        {
-          user_id: userId,
-          work_id: workId,
-          progress: clampedProgress,
-          updated_at: nowIso,
-        },
-        { onConflict: 'user_id,work_id' }
-      ),
-    ]);
-  } catch {
-    // Bỏ qua lỗi mạng nền
+  // 1. Cài đặt TTS (bảng public.user_tts_settings)
+  if (bundle.ttsSettings) {
+    tasks.push(
+      Promise.resolve(
+        supabase.from('user_tts_settings').upsert(
+          {
+            user_id: uid,
+            voice_uri: bundle.ttsSettings.voiceURI || '',
+            rate: bundle.ttsSettings.rate ?? 1.0,
+            pitch: bundle.ttsSettings.pitch ?? 1.0,
+            volume: bundle.ttsSettings.volume ?? 1.0,
+            auto_next_segment: bundle.ttsSettings.autoNextSegment ?? true,
+            auto_scroll: bundle.ttsSettings.autoScroll ?? true,
+            highlight_active: bundle.ttsSettings.highlightActive ?? true,
+            font_size: bundle.ttsSettings.fontSize || 'base',
+            updated_at: nowIso,
+          },
+          { onConflict: 'user_id' }
+        )
+      )
+    );
   }
-}
 
-/**
- * 4. Thêm hoặc xóa tác phẩm yêu thích trong bảng `public.favorites` (`user_id = session.user.id`).
- */
-export async function toggleFavoriteWorkInSupabase(
-  userId: string,
-  workId: string,
-  isFavorited: boolean
-): Promise<void> {
-  if (!isSupabaseConfigured || !isValidUUID(userId) || !isValidUUID(workId)) return;
-  try {
-    if (isFavorited) {
-      await supabase.from('favorites').upsert(
-        {
-          user_id: userId,
-          work_id: workId,
-          created_at: new Date().toISOString(),
-        },
-        { onConflict: 'user_id,work_id' }
+  // 2. Lịch sử đọc (bảng public.reading_history)
+  if (Array.isArray(bundle.readingHistory) && bundle.readingHistory.length > 0) {
+    const historyRows = bundle.readingHistory.slice(0, 50).map((item) => ({
+      user_id: uid,
+      document_key: item.documentId,
+      document_title: item.documentTitle,
+      author_name: item.author || 'Khuyết danh',
+      segment_index: item.segmentIndex ?? 0,
+      total_segments: item.totalSegments ?? 1,
+      progress_percent: item.progressPercent ?? 0,
+      last_read_at: item.updatedAt || nowIso,
+    }));
+    tasks.push(
+      Promise.resolve(
+        supabase
+          .from('reading_history')
+          .upsert(historyRows, { onConflict: 'user_id,document_key' })
+      )
+    );
+  }
+
+  // 3. Tiến độ đọc (bảng public.reading_progress)
+  if (bundle.readingProgress && Object.keys(bundle.readingProgress).length > 0) {
+    const progressRows = Object.values(bundle.readingProgress).map((prog) => ({
+      user_id: uid,
+      document_key: prog.documentId,
+      segment_index: prog.segmentIndex,
+      total_segments: prog.totalSegments,
+      progress: prog.progressPercent,
+      updated_at: prog.updatedAt || nowIso,
+    }));
+    tasks.push(
+      Promise.resolve(
+        supabase
+          .from('reading_progress')
+          .upsert(progressRows, { onConflict: 'user_id,document_key' })
+      )
+    );
+  }
+
+  // 4. Ghi chú cá nhân (bảng public.personal_notes)
+  if (Array.isArray(bundle.personalNotes)) {
+    const noteRows = bundle.personalNotes.map((n) => ({
+      id: n.id,
+      user_id: uid,
+      document_key: n.documentId || '',
+      document_title: n.documentTitle || '',
+      title: n.title,
+      content: n.content,
+      tags: n.tags || [],
+      is_favorite: Boolean(n.isFavorite),
+      updated_at: n.updatedAt || nowIso,
+    }));
+    if (noteRows.length > 0) {
+      tasks.push(
+        Promise.resolve(
+          supabase.from('personal_notes').upsert(noteRows, { onConflict: 'user_id,id' })
+        )
       );
-    } else {
-      await supabase
-        .from('favorites')
-        .delete()
-        .eq('user_id', userId)
-        .eq('work_id', workId);
     }
-  } catch {
-    // Bỏ qua lỗi mạng nền
   }
+
+  // 5. Sách / Tác phẩm yêu thích (bảng public.favorites)
+  if (Array.isArray(bundle.favorites)) {
+    const favRows = bundle.favorites.map((docKey) => ({
+      user_id: uid,
+      document_key: docKey,
+      created_at: nowIso,
+    }));
+    if (favRows.length > 0) {
+      tasks.push(
+        Promise.resolve(
+          supabase
+            .from('favorites')
+            .upsert(favRows, { onConflict: 'user_id,document_key' })
+        )
+      );
+    }
+  }
+
+  // 6. Tài liệu văn học đã lưu (bảng public.saved_documents)
+  if (Array.isArray(bundle.savedDocuments) && bundle.savedDocuments.length > 0) {
+    const docRows = bundle.savedDocuments.map((d) => ({
+      id: d.id,
+      user_id: uid,
+      title: d.title,
+      author: d.author || 'Khuyết danh',
+      category: d.category || 'Tài liệu học tập',
+      period: d.period || 'Văn học Việt Nam',
+      summary: d.summary || '',
+      content: d.content,
+      tags: d.bookmarks || [],
+      is_favorite: Boolean(d.isFavorite),
+      updated_at: nowIso,
+    }));
+    tasks.push(
+      Promise.resolve(
+        supabase.from('saved_documents').upsert(docRows, { onConflict: 'user_id,id' })
+      )
+    );
+  }
+
+  await Promise.allSettled(tasks);
 }
 
 /**
- * 5. Truy vấn danh sách bài giảng (`public.lessons`) và học liệu (`public.materials`).
- */
-export async function fetchLessonsAndMaterialsFromSupabase(): Promise<{
-  lessons: SupabaseLessonRow[];
-  materials: SupabaseMaterialRow[];
-}> {
-  if (!isSupabaseConfigured) return { lessons: [], materials: [] };
-  try {
-    const [lessonsRes, materialsRes] = await Promise.all([
-      supabase
-        .from('lessons')
-        .select('id, title, description, content, teacher_id, created_at')
-        .order('created_at', { ascending: false }),
-      supabase
-        .from('materials')
-        .select('id, title, description, file_url, teacher_id, created_at')
-        .order('created_at', { ascending: false }),
-    ]);
-
-    return {
-      lessons: (lessonsRes.data as SupabaseLessonRow[]) || [],
-      materials: (materialsRes.data as SupabaseMaterialRow[]) || [],
-    };
-  } catch {
-    return { lessons: [], materials: [] };
-  }
-}
-
-/**
- * Tải dữ liệu cá nhân hóa theo UUID (`session.user.id`) từ Supabase hoặc Cloud SQL PostgreSQL (/api/user-data).
+ * Khi mở website: Tải dữ liệu đồng bộ từ Supabase theo đúng UUID (`session.user.id`).
+ * Nếu có thay đổi ngoại tuyến chưa đồng bộ trong hàng đợi của chính UUID đó, tự động đẩy lên Supabase trước.
  */
 export async function fetchUserWorkspaceData(
   uid: string,
   token: string
 ): Promise<{
   data: Partial<UserWorkspaceBundle> | null;
-  source: 'supabase' | 'cloudsql' | 'local';
+  source: 'supabase' | 'local';
 }> {
-  if (isSupabaseConfigured && isValidUUID(uid)) {
+  if (!isValidUUID(uid)) {
+    return { data: null, source: 'local' };
+  }
+
+  // Nếu thiết bị đang có dữ liệu ngoại tuyến chờ đồng bộ và hiện đã có mạng, đẩy lên Supabase trước
+  const pendingQueue = getOfflineSyncQueue(uid);
+  if (pendingQueue && (typeof navigator === 'undefined' || navigator.onLine !== false)) {
+    await syncUserWorkspaceData(uid, token, pendingQueue);
+  }
+
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return { data: loadLocalWorkspaceCache(uid), source: 'local' };
+  }
+
+  // 1. Tải từ bảng `user_workspace_sync` trên Supabase PostgreSQL
+  if (isSupabaseConfigured) {
     try {
       const { data, error } = await supabase
         .from('user_workspace_sync')
@@ -295,6 +305,9 @@ export async function fetchUserWorkspaceData(
           lastDocumentId: data.last_document_id || 'doc-truyen-kieu',
           lastSegmentIndex:
             typeof data.last_segment_index === 'number' ? data.last_segment_index : 0,
+          readingProgress: data.reading_progress_json
+            ? JSON.parse(data.reading_progress_json)
+            : {},
           ttsSettings: data.tts_settings_json ? JSON.parse(data.tts_settings_json) : undefined,
           personalNotes: data.personal_notes_json
             ? JSON.parse(data.personal_notes_json)
@@ -312,10 +325,11 @@ export async function fetchUserWorkspaceData(
         return { data: parsed, source: 'supabase' };
       }
     } catch {
-      // Fallback sang máy chủ Cloud SQL
+      // Tiếp tục kiểm tra qua endpoint đồng bộ Supabase trên máy chủ
     }
   }
 
+  // 2. Tải từ endpoint đồng bộ Supabase trên máy chủ (/api/user-data) cô lập theo Bearer Token UUID
   try {
     const res = await fetch('/api/user-data', {
       headers: {
@@ -326,53 +340,77 @@ export async function fetchUserWorkspaceData(
       const payload = await res.json();
       if (payload && payload.workspace) {
         saveLocalWorkspaceCache(uid, payload.workspace);
-        return { data: payload.workspace, source: 'cloudsql' };
+        return { data: payload.workspace, source: 'supabase' };
       }
     }
   } catch {
-    // Giữ nguyên dữ liệu cục bộ khi mạng lỗi
+    // Mất kết nối mạng -> đọc từ bộ nhớ đệm cục bộ của đúng UUID này
   }
 
   return { data: loadLocalWorkspaceCache(uid), source: 'local' };
 }
 
 /**
- * Đồng bộ dữ liệu cá nhân hóa của người dùng theo UUID (`session.user.id`).
+ * Khi người dùng thay đổi bất kỳ dữ liệu nào (lịch sử đọc, tiến độ đọc, ghi chú, sách yêu thích,
+ * tài liệu đã lưu, cài đặt TTS): Tự động lưu lên Supabase PostgreSQL.
+ * Nếu mất mạng, tự động đưa vào hàng đợi ngoại tuyến (Offline Queue) để đồng bộ lại ngay khi có mạng.
  */
 export async function syncUserWorkspaceData(
   uid: string,
   token: string,
   bundle: Partial<UserWorkspaceBundle>
-): Promise<{ ok: boolean; syncedAt: string }> {
+): Promise<{ ok: boolean; syncedAt: string; queuedOffline?: boolean }> {
   const nowIso = new Date().toISOString();
-  saveLocalWorkspaceCache(uid, bundle);
+  if (!isValidUUID(uid)) {
+    return { ok: false, syncedAt: nowIso };
+  }
 
-  if (isSupabaseConfigured && isValidUUID(uid)) {
+  saveLocalWorkspaceCache(uid, bundle);
+  const fullSnapshot = loadLocalWorkspaceCache(uid) || bundle;
+
+  // Kiểm tra trạng thái mạng trình duyệt
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    enqueueOfflineSyncPatch(uid, fullSnapshot);
+    return { ok: false, syncedAt: nowIso, queuedOffline: true };
+  }
+
+  let supabaseDirectSuccess = false;
+
+  if (isSupabaseConfigured) {
     try {
       const row: Record<string, unknown> = {
         user_id: uid,
         updated_at: nowIso,
       };
-      if (bundle.lastDocumentId !== undefined) row.last_document_id = bundle.lastDocumentId;
-      if (bundle.lastSegmentIndex !== undefined) row.last_segment_index = bundle.lastSegmentIndex;
-      if (bundle.ttsSettings !== undefined)
-        row.tts_settings_json = JSON.stringify(bundle.ttsSettings);
-      if (bundle.personalNotes !== undefined)
-        row.personal_notes_json = JSON.stringify(bundle.personalNotes);
-      if (bundle.readingHistory !== undefined)
-        row.reading_history_json = JSON.stringify(bundle.readingHistory);
-      if (bundle.favorites !== undefined) row.favorites_json = JSON.stringify(bundle.favorites);
-      if (bundle.savedDocuments !== undefined)
-        row.saved_documents_json = JSON.stringify(bundle.savedDocuments);
+      if (fullSnapshot.lastDocumentId !== undefined)
+        row.last_document_id = fullSnapshot.lastDocumentId;
+      if (fullSnapshot.lastSegmentIndex !== undefined)
+        row.last_segment_index = fullSnapshot.lastSegmentIndex;
+      if (fullSnapshot.readingProgress !== undefined)
+        row.reading_progress_json = JSON.stringify(fullSnapshot.readingProgress);
+      if (fullSnapshot.ttsSettings !== undefined)
+        row.tts_settings_json = JSON.stringify(fullSnapshot.ttsSettings);
+      if (fullSnapshot.personalNotes !== undefined)
+        row.personal_notes_json = JSON.stringify(fullSnapshot.personalNotes);
+      if (fullSnapshot.readingHistory !== undefined)
+        row.reading_history_json = JSON.stringify(fullSnapshot.readingHistory);
+      if (fullSnapshot.favorites !== undefined)
+        row.favorites_json = JSON.stringify(fullSnapshot.favorites);
+      if (fullSnapshot.savedDocuments !== undefined)
+        row.saved_documents_json = JSON.stringify(fullSnapshot.savedDocuments);
 
       const { error } = await supabase
         .from('user_workspace_sync')
         .upsert(row, { onConflict: 'user_id' });
+
       if (!error) {
-        return { ok: true, syncedAt: nowIso };
+        supabaseDirectSuccess = true;
       }
+
+      // Đồng bộ song song vào các bảng chuẩn hóa (reading_history, reading_progress, personal_notes, favorites, saved_documents, user_tts_settings)
+      syncNormalizedSupabaseTables(uid, fullSnapshot).catch(() => {});
     } catch {
-      // Tiếp tục đồng bộ qua API Cloud SQL
+      // Sẽ tiếp tục đồng bộ qua /api/user-data
     }
   }
 
@@ -383,14 +421,217 @@ export async function syncUserWorkspaceData(
         'Content-Type': 'application/json',
         Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify(bundle),
+      body: JSON.stringify(fullSnapshot),
     });
     if (res.ok) {
+      clearOfflineSyncQueue(uid);
       return { ok: true, syncedAt: nowIso };
     }
   } catch {
-    // Báo lỗi đồng bộ để UI hiển thị đúng trạng thái
+    // Lỗi kết nối mạng
   }
 
-  return { ok: false, syncedAt: nowIso };
+  if (supabaseDirectSuccess) {
+    clearOfflineSyncQueue(uid);
+    return { ok: true, syncedAt: nowIso };
+  }
+
+  // Nếu không thể kết nối tới Supabase, lưu vào hàng đợi ngoại tuyến để tự động đồng bộ lại khi có mạng
+  enqueueOfflineSyncPatch(uid, fullSnapshot);
+  return { ok: false, syncedAt: nowIso, queuedOffline: true };
+}
+
+/**
+ * Tự động đồng bộ lại hàng đợi ngoại tuyến khi thiết bị có mạng trở lại.
+ */
+export async function flushOfflineQueueToSupabase(
+  uid: string,
+  token: string
+): Promise<{ ok: boolean; syncedAt: string }> {
+  const pending = getOfflineSyncQueue(uid);
+  if (!pending) {
+    return { ok: true, syncedAt: new Date().toISOString() };
+  }
+  return syncUserWorkspaceData(uid, token, pending);
+}
+
+// ============================================================================
+// CƠ CHẾ ĐỒNG BỘ ĐA THIẾT BỊ CHO CÙNG MỘT NGƯỜI DÙNG
+// (Không bao giờ giả định hai tài khoản ẩn danh khác nhau là cùng một người)
+// ============================================================================
+
+/**
+ * Tạo Mã Ghép Nối Thiết Bị một lần (One-Time Pairing Code, có hiệu lực 15 phút)
+ * trên Supabase (`public.device_sync_codes`) cho người dùng hiện tại (`session.user.id`).
+ */
+export async function createMultiDevicePairingCode(
+  uid: string,
+  token: string,
+  session: Session | null
+): Promise<{ ok: boolean; code?: string; expiresAt?: string; error?: string }> {
+  if (!isValidUUID(uid)) {
+    return { ok: false, error: 'Phiên người dùng chưa sẵn sàng.' };
+  }
+
+  try {
+    const res = await fetch('/api/device-sync/create', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        sessionPayload: session,
+      }),
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      if (data?.code) {
+        // Nếu Supabase đã chạy SQL migration, lưu đồng thời vào bảng public.device_sync_codes
+        if (isSupabaseConfigured && session) {
+          Promise.resolve(
+            supabase.from('device_sync_codes').upsert({
+              code: data.code,
+              owner_user_id: uid,
+              session_payload: session,
+              expires_at: data.expiresAt,
+              claimed: false,
+            })
+          ).catch(() => {});
+        }
+        return {
+          ok: true,
+          code: data.code,
+          expiresAt: data.expiresAt,
+        };
+      }
+    }
+    const errJson = await res.json().catch(() => ({}));
+    return {
+      ok: false,
+      error: errJson?.error || 'Không thể khởi tạo mã ghép nối thiết bị.',
+    };
+  } catch {
+    return {
+      ok: false,
+      error: 'Mất kết nối mạng khi tạo mã ghép nối thiết bị.',
+    };
+  }
+}
+
+/**
+ * Thiết bị thứ 2 nhập Mã Ghép Nối (`LS-XXX-XXX`) hoặc Khóa Phiên Đa Thiết Bị (`LSKEY....`)
+ * để liên kết vào đúng tài khoản Supabase (`session.user.id`) của người dùng đó và tải toàn bộ dữ liệu.
+ */
+export async function claimMultiDevicePairingCode(
+  rawInput: string
+): Promise<{
+  ok: boolean;
+  session?: Session;
+  workspace?: Partial<UserWorkspaceBundle> | null;
+  error?: string;
+}> {
+  const cleaned = rawInput.trim();
+  if (!cleaned) {
+    return { ok: false, error: 'Vui lòng nhập Mã Ghép Nối hoặc Khóa Liên Kết Đa Thiết Bị.' };
+  }
+
+  // Trường hợp 1: Người dùng nhập Khóa Liên Kết Đa Thiết Bị trực tiếp (LSKEY....)
+  if (cleaned.startsWith('LSKEY.')) {
+    const decodedSession = decodeMultiDeviceSyncKey(cleaned);
+    if (!decodedSession || !isValidUUID(decodedSession.user.id)) {
+      return {
+        ok: false,
+        error: 'Khóa Liên Kết Đa Thiết Bị không hợp lệ hoặc bị hỏng.',
+      };
+    }
+    const { data: syncedData } = await fetchUserWorkspaceData(
+      decodedSession.user.id,
+      decodedSession.access_token
+    );
+    return {
+      ok: true,
+      session: decodedSession,
+      workspace: syncedData,
+    };
+  }
+
+  // Trường hợp 2: Người dùng nhập Mã Ghép Nối 1 lần (ví dụ: LS-482-910)
+  const code = cleaned.toUpperCase();
+
+  // Thử gọi RPC `claim_device_sync_code` trên Supabase PostgreSQL trước
+  if (isSupabaseConfigured) {
+    try {
+      const { data: rpcPayload, error: rpcError } = await supabase.rpc(
+        'claim_device_sync_code',
+        { p_code: code }
+      );
+      if (!rpcError && rpcPayload && typeof rpcPayload === 'object') {
+        const targetUid = (rpcPayload as any)?.user?.id;
+        if (isValidUUID(targetUid)) {
+          const targetSession = buildAnonymousSupabaseSession(
+            targetUid,
+            (rpcPayload as any)?.user?.created_at,
+            (rpcPayload as any)?.access_token
+          );
+          const { data: syncedData } = await fetchUserWorkspaceData(
+            targetUid,
+            targetSession.access_token
+          );
+          return {
+            ok: true,
+            session: targetSession,
+            workspace: syncedData,
+          };
+        }
+      }
+    } catch {
+      // Tiếp tục kiểm tra qua endpoint máy chủ
+    }
+  }
+
+  try {
+    const res = await fetch('/api/device-sync/claim', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code }),
+    });
+
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data?.ok) {
+      return {
+        ok: false,
+        error:
+          data?.error ||
+          'Mã ghép nối không tồn tại, đã được sử dụng hoặc đã hết hạn.',
+      };
+    }
+
+    const ownerUuid = data.ownerUserId || data.session?.user?.id;
+    if (!isValidUUID(ownerUuid)) {
+      return { ok: false, error: 'Dữ liệu phiên từ mã ghép nối không hợp lệ.' };
+    }
+
+    const linkedSession = buildAnonymousSupabaseSession(
+      ownerUuid,
+      data.session?.user?.created_at,
+      data.session?.access_token
+    );
+
+    if (data.workspace) {
+      saveLocalWorkspaceCache(ownerUuid, data.workspace);
+    }
+
+    return {
+      ok: true,
+      session: linkedSession,
+      workspace: data.workspace || null,
+    };
+  } catch {
+    return {
+      ok: false,
+      error: 'Không thể kết nối tới máy chủ để xác thực mã ghép nối thiết bị.',
+    };
+  }
 }

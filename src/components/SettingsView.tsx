@@ -98,10 +98,52 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       : 'unsupported'
   );
   const [statusToast, setStatusToast] = useState<string | null>(null);
+  const [generatedPairingCode, setGeneratedPairingCode] = useState<string>('');
+  const [pairingExpiresAt, setPairingExpiresAt] = useState<string>('');
+  const [inputPairingCode, setInputPairingCode] = useState<string>('');
+  const [pairingFeedback, setPairingFeedback] = useState<{
+    type: 'success' | 'error';
+    text: string;
+  } | null>(null);
 
   useEffect(() => {
     return vietnameseTTS.subscribe((snap) => setTtsSnapshot(snap));
   }, []);
+
+  const handleGeneratePairingCode = async () => {
+    setPairingFeedback(null);
+    const res = await auth.generateDevicePairingCode();
+    if (res.ok && res.code) {
+      setGeneratedPairingCode(res.code);
+      setPairingExpiresAt(res.expiresAt || '');
+      setPairingFeedback({
+        type: 'success',
+        text: `Đã tạo mã ghép nối ${res.code} (hiệu lực 15 phút). Nhập mã này trên thiết bị thứ 2 để đồng bộ tài khoản!`,
+      });
+    } else {
+      setPairingFeedback({
+        type: 'error',
+        text: res.error || 'Không thể tạo mã ghép nối thiết bị.',
+      });
+    }
+  };
+
+  const handleClaimPairingCode = async () => {
+    setPairingFeedback(null);
+    const res = await auth.linkWithDeviceCode(inputPairingCode);
+    if (res.ok) {
+      setInputPairingCode('');
+      setPairingFeedback({
+        type: 'success',
+        text: `Đã liên kết thiết bị thành công sang tài khoản UUID: ${res.newUserId}! Đang tải toàn bộ dữ liệu đồng bộ...`,
+      });
+    } else {
+      setPairingFeedback({
+        type: 'error',
+        text: res.error || 'Mã ghép nối không hợp lệ hoặc đã hết hạn.',
+      });
+    }
+  };
 
   const handleTestScreenShare = async () => {
     if (
@@ -155,14 +197,26 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </p>
           </div>
 
-          <button
-            type="button"
-            data-testid="settings-sync-button"
-            onClick={handleSaveCloudPreferences}
-            className="rounded-lg bg-[#8275F5] px-4 py-2 text-xs font-semibold text-white hover:bg-[#7162E8] transition-colors whitespace-nowrap cursor-pointer"
-          >
-            Đồng bộ cài đặt ngay
-          </button>
+          <div className="flex flex-wrap items-center gap-2.5">
+            <a
+              href="/literature-studio-full.zip"
+              download="literature-studio-vietnamese-edition.zip"
+              data-testid="settings-download-zip-btn"
+              className="inline-flex items-center gap-1.5 rounded-lg bg-[#E9C878] px-4 py-2 text-xs font-bold text-[#0B0D17] hover:bg-[#E9C878]/90 transition-colors whitespace-nowrap cursor-pointer"
+            >
+              <Download className="h-3.5 w-3.5" />
+              <span>Tải dự án (.ZIP)</span>
+            </a>
+
+            <button
+              type="button"
+              data-testid="settings-sync-button"
+              onClick={handleSaveCloudPreferences}
+              className="rounded-lg bg-[#8275F5] px-4 py-2 text-xs font-semibold text-white hover:bg-[#7162E8] transition-colors whitespace-nowrap cursor-pointer"
+            >
+              Đồng bộ cài đặt ngay
+            </button>
+          </div>
         </div>
 
         {statusToast && (
@@ -701,6 +755,116 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               </div>
             </div>
           </div>
+
+          {/* Khu vực Đồng bộ Dữ liệu Đa Thiết Bị cho cùng một người dùng */}
+          <div
+            data-testid="multi-device-sync-card"
+            className="rounded-lg bg-[var(--bg-surface)] p-5 border border-[#8275F5]/30 space-y-4"
+          >
+            <div>
+              <h3 className="text-sm font-bold text-[#E9C878]">
+                Đồng bộ Dữ liệu Đa Thiết Bị (Cùng Một Người Dùng)
+              </h3>
+              <p className="text-[11px] text-[var(--text-muted)] mt-0.5">
+                Hệ thống cô lập từng tài khoản ẩn danh theo UUID riêng biệt và không bao giờ tự gộp hai tài khoản ẩn danh khác nhau. Để sử dụng cùng một kho dữ liệu (Lịch sử đọc, Tiến độ đọc, Ghi chú, Sách yêu thích, Tài liệu đã lưu, Cài đặt TTS) trên máy tính, điện thoại hoặc tablet khác, hãy tạo Mã Ghép Nối 1 lần hoặc sao chép Khóa Liên Kết bên dưới:
+              </p>
+            </div>
+
+            {pairingFeedback && (
+              <div
+                data-testid="pairing-feedback-banner"
+                className={`rounded-lg p-3 border font-medium ${
+                  pairingFeedback.type === 'success'
+                    ? 'bg-[#36C98F]/15 border-[#36C98F]/40 text-[#36C98F]'
+                    : 'bg-[#F16C78]/15 border-[#F16C78]/40 text-[#F16C78]'
+                }`}
+              >
+                {pairingFeedback.text}
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              {/* Cột 1: Xuất phiên từ Thiết bị hiện tại */}
+              <div className="rounded-lg bg-[var(--bg-card)] p-4 border border-[var(--border-subtle)] space-y-3">
+                <div className="font-semibold text-[var(--text-main)]">
+                  Bước 1 (Trên Thiết bị Gốc): Tạo Mã Ghép Nối Thiết Bị
+                </div>
+                <p className="text-[11px] text-[var(--text-muted)]">
+                  Tạo mã ghép nối 1 lần (hiệu lực 15 phút) lưu trên bảng <code className="text-[#E9C878]">public.device_sync_codes</code> của Supabase để nhập trên thiết bị thứ 2:
+                </p>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    data-testid="btn-generate-pairing-code"
+                    onClick={handleGeneratePairingCode}
+                    className="rounded-lg bg-[#8275F5] px-3.5 py-2 font-semibold text-white hover:bg-[#7162E8] transition-colors cursor-pointer"
+                  >
+                    Tạo Mã Ghép Nối Mới
+                  </button>
+
+                  {generatedPairingCode && (
+                    <div
+                      data-testid="generated-pairing-code-display"
+                      className="px-3.5 py-1.5 rounded-lg bg-[#E9C878]/15 border border-[#E9C878]/40 font-mono text-sm font-bold text-[#E9C878]"
+                    >
+                      {generatedPairingCode}
+                    </div>
+                  )}
+                </div>
+
+                {pairingExpiresAt && (
+                  <p className="text-[10px] text-[var(--text-muted)]">
+                    Hết hạn lúc: {new Date(pairingExpiresAt).toLocaleTimeString('vi-VN')}
+                  </p>
+                )}
+
+                {auth.multiDeviceSyncKey && (
+                  <div className="pt-2 border-t border-[var(--border-subtle)] space-y-1">
+                    <span className="text-[11px] text-[var(--text-muted)] block">
+                      Hoặc sao chép Khóa Liên Kết Đa Thiết Bị trực tiếp:
+                    </span>
+                    <input
+                      type="text"
+                      readOnly
+                      value={auth.multiDeviceSyncKey}
+                      onFocus={(e) => e.currentTarget.select()}
+                      className="w-full rounded bg-[var(--bg-surface)] border border-[var(--border-subtle)] px-2.5 py-1.5 font-mono text-[10px] text-[#A78BFA]"
+                    />
+                  </div>
+                )}
+              </div>
+
+              {/* Cột 2: Nhập mã trên Thiết bị thứ 2 */}
+              <div className="rounded-lg bg-[var(--bg-card)] p-4 border border-[var(--border-subtle)] space-y-3">
+                <div className="font-semibold text-[var(--text-main)]">
+                  Bước 2 (Trên Thiết bị Thứ 2): Nhập Mã để Đồng Bộ
+                </div>
+                <p className="text-[11px] text-[var(--text-muted)]">
+                  Nhập Mã Ghép Nối (<code className="text-[#E9C878]">LS-XXX-XXX</code>) hoặc Khóa Liên Kết (<code className="text-[#A78BFA]">LSKEY....</code>) từ thiết bị gốc để liên kết vào cùng tài khoản Supabase:
+                </p>
+
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <input
+                    type="text"
+                    data-testid="input-device-pairing-code"
+                    value={inputPairingCode}
+                    onChange={(e) => setInputPairingCode(e.target.value)}
+                    placeholder="Nhập mã LS-XXX-XXX hoặc LSKEY...."
+                    className="flex-1 rounded-lg bg-[var(--bg-surface)] border border-[var(--border-subtle)] px-3 py-2 text-xs text-[var(--text-main)] font-mono focus:outline-none focus:border-[#8275F5]"
+                  />
+                  <button
+                    type="button"
+                    data-testid="btn-claim-pairing-code"
+                    onClick={handleClaimPairingCode}
+                    className="rounded-lg bg-[#36C98F] px-4 py-2 font-bold text-[#0B0D17] hover:bg-[#36C98F]/90 transition-colors whitespace-nowrap cursor-pointer"
+                  >
+                    Liên kết & Đồng bộ
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
         </section>
       )}
 
@@ -733,6 +897,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
 
           <div className="flex flex-wrap items-center gap-3 pt-2">
+            <a
+              href="/literature-studio-full.zip"
+              download="literature-studio-vietnamese-edition.zip"
+              className="flex items-center gap-2 rounded-lg bg-[#E9C878] px-4 py-2 font-bold text-[#0B0D17] hover:bg-[#E9C878]/90 cursor-pointer"
+            >
+              <Download className="h-4 w-4" />
+              <span>Tải toàn bộ mã nguồn dự án (.ZIP)</span>
+            </a>
+
             <button
               type="button"
               onClick={onExportFullStudioData}
@@ -795,7 +968,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 <div>
                   <p className="font-semibold text-[var(--text-main)]">Cơ sở dữ liệu & Đồng bộ</p>
                   <p className="text-[11px] text-[var(--text-muted)]">
-                    {isSupabaseConfigured ? 'Supabase RLS' : 'Cloud SQL PostgreSQL'}
+                    Supabase PostgreSQL (RLS)
                   </p>
                 </div>
                 {healthStatus?.services.databaseConnected ? (

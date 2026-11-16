@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Menu, Sparkles, CloudCheck, RefreshCw, AlertCircle, BookOpenCheck } from 'lucide-react';
+import { Menu, Sparkles, CloudCheck, RefreshCw, AlertCircle, BookOpenCheck, FolderArchive } from 'lucide-react';
 import {
   HealthStatusResponse,
   setMemoryAuthToken,
@@ -32,7 +32,13 @@ import type {
 } from './types/studio.ts';
 import { parseMarkdownToSlides } from './utils/studioLogic.ts';
 import { useAuth } from './context/AuthContext.tsx';
-import { fetchUserWorkspaceData, syncUserWorkspaceData } from './lib/userData.ts';
+import {
+  fetchUserWorkspaceData,
+  flushOfflineQueueToSupabase,
+  hasPendingOfflineSync,
+  syncUserWorkspaceData,
+  type ReadingProgressMapItem,
+} from './lib/userData.ts';
 import { VI } from './i18n/vi.ts';
 import { Sidebar } from './components/Sidebar.tsx';
 import { BottomPlayer } from './components/BottomPlayer.tsx';
@@ -94,9 +100,12 @@ export default function App() {
     breakdown: { tracksBytes: 0, videosBytes: 0, docsBytes: 0 },
   });
 
-  // Trạng thái đọc văn bản, ghi chú cá nhân & đồng bộ theo tài khoản ẩn danh
+  // Trạng thái đọc văn bản, tiến độ, sách yêu thích, tài liệu đã lưu, ghi chú cá nhân & cài đặt TTS đồng bộ Supabase
   const [lastDocumentId, setLastDocumentId] = useState<string>('doc-truyen-kieu');
   const [lastSegmentIndex, setLastSegmentIndex] = useState<number>(0);
+  const [readingProgressMap, setReadingProgressMap] = useState<
+    Record<string, ReadingProgressMapItem>
+  >({});
   const [personalNotes, setPersonalNotes] = useState<PersonalNoteItem[]>(DEFAULT_NOTES);
   const [readingHistory, setReadingHistory] = useState<ReadingHistoryItem[]>([]);
   const [ttsSettings, setTtsSettings] = useState<TTSSettingsConfig>({
@@ -216,7 +225,6 @@ export default function App() {
         ...prev,
         uid: auth.userId!,
         username: auth.displayName,
-        // Yêu cầu 9: Không cấp quyền Admin hoặc Teacher cho tài khoản ẩn danh
         role: 'user',
         isAuthenticated: true,
       }));
@@ -236,29 +244,65 @@ export default function App() {
         if (typeof syncedWorkspace.lastSegmentIndex === 'number') {
           setLastSegmentIndex(syncedWorkspace.lastSegmentIndex);
         }
+        if (syncedWorkspace.readingProgress && typeof syncedWorkspace.readingProgress === 'object') {
+          setReadingProgressMap(syncedWorkspace.readingProgress);
+        }
         if (syncedWorkspace.ttsSettings) {
           setTtsSettings((prev) => ({ ...prev, ...syncedWorkspace.ttsSettings }));
         }
-        if (
-          Array.isArray(syncedWorkspace.personalNotes) &&
-          syncedWorkspace.personalNotes.length > 0
-        ) {
-          setPersonalNotes(syncedWorkspace.personalNotes);
+        if (Array.isArray(syncedWorkspace.personalNotes)) {
+          setPersonalNotes(
+            syncedWorkspace.personalNotes.length > 0
+              ? syncedWorkspace.personalNotes
+              : DEFAULT_NOTES
+          );
         }
         if (Array.isArray(syncedWorkspace.readingHistory)) {
           setReadingHistory(syncedWorkspace.readingHistory);
+        }
+        // Khôi phục tài liệu đã lưu & sách yêu thích từ Supabase
+        if (
+          Array.isArray(syncedWorkspace.savedDocuments) ||
+          Array.isArray(syncedWorkspace.favorites)
+        ) {
+          const favSet = new Set(syncedWorkspace.favorites || []);
+          const remoteDocs = Array.isArray(syncedWorkspace.savedDocuments)
+            ? syncedWorkspace.savedDocuments
+            : [];
+          setDocuments((prevDocs) => {
+            const byId = new Map<string, LiteratureDocument>();
+            for (const d of prevDocs) {
+              byId.set(d.id, { ...d, isFavorite: favSet.has(d.id) || d.isFavorite });
+            }
+            for (const rd of remoteDocs) {
+              if (rd && rd.id) {
+                byId.set(rd.id, {
+                  ...rd,
+                  isFavorite: favSet.has(rd.id) || Boolean(rd.isFavorite),
+                });
+              }
+            }
+            return Array.from(byId.values());
+          });
         }
       } else {
         await syncUserWorkspaceData(auth.userId!, activeToken, {
           lastDocumentId: 'doc-truyen-kieu',
           lastSegmentIndex: 0,
+          readingProgress: {},
           ttsSettings,
           personalNotes: DEFAULT_NOTES,
           readingHistory: [],
+          favorites: [],
+          savedDocuments: [],
         });
       }
 
-      setSyncStatus(source === 'local' ? 'local' : 'synced');
+      if (hasPendingOfflineSync(auth.userId!)) {
+        setSyncStatus('error');
+      } else {
+        setSyncStatus(source === 'local' ? 'local' : 'synced');
+      }
     })();
 
     return () => {
@@ -266,27 +310,73 @@ export default function App() {
     };
   }, [auth.userId, auth.session?.access_token, auth.displayName]);
 
-  // Hàm đồng bộ dữ liệu cá nhân của người dùng ẩn danh lên máy chủ
+  // Xử lý mất mạng và tự động đồng bộ lại hàng đợi ngoại tuyến khi có mạng trở lại
+  useEffect(() => {
+    if (!auth.userId) return;
+    const activeToken = auth.session?.access_token || sessionToken || `anon_tok_${auth.userId}`;
+
+    const handleOnlineSync = async () => {
+      setSyncStatus('syncing');
+      const res = await flushOfflineQueueToSupabase(auth.userId!, activeToken);
+      if (res.ok) {
+        setSyncStatus('synced');
+        showToast('Đã khôi phục kết nối mạng và đồng bộ dữ liệu lên Supabase thành công!');
+      } else {
+        setSyncStatus('error');
+      }
+    };
+
+    const handleOfflineNotice = () => {
+      setSyncStatus('error');
+      showToast('Mất kết nối mạng — Thay đổi của bạn được lưu tạm và sẽ tự động đồng bộ khi có mạng.');
+    };
+
+    if (typeof window !== 'undefined') {
+      window.addEventListener('online', handleOnlineSync);
+      window.addEventListener('offline', handleOfflineNotice);
+    }
+
+    return () => {
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('online', handleOnlineSync);
+        window.removeEventListener('offline', handleOfflineNotice);
+      }
+    };
+  }, [auth.userId, auth.session?.access_token, sessionToken]);
+
+  // Hàm đồng bộ toàn bộ 6 nhóm dữ liệu cá nhân của người dùng lên Supabase PostgreSQL
   const persistUserWorkspace = async (patch: {
     lastDocumentId?: string;
     lastSegmentIndex?: number;
+    readingProgress?: Record<string, ReadingProgressMapItem>;
     ttsSettings?: TTSSettingsConfig;
     personalNotes?: PersonalNoteItem[];
     readingHistory?: ReadingHistoryItem[];
+    favorites?: string[];
+    savedDocuments?: LiteratureDocument[];
   }) => {
-    if (!user.uid || user.uid === 'anon_initializing') return;
+    const activeUid = auth.userId || user.uid;
+    if (!activeUid || activeUid === 'anon_initializing') return;
     setSyncStatus('syncing');
-    const result = await syncUserWorkspaceData(user.uid, sessionToken, {
+
+    const nextDocs = patch.savedDocuments ?? documents;
+    const nextFavorites =
+      patch.favorites ?? nextDocs.filter((d) => d.isFavorite).map((d) => d.id);
+
+    const result = await syncUserWorkspaceData(activeUid, sessionToken, {
       lastDocumentId: patch.lastDocumentId ?? lastDocumentId,
       lastSegmentIndex: patch.lastSegmentIndex ?? lastSegmentIndex,
+      readingProgress: patch.readingProgress ?? readingProgressMap,
       ttsSettings: patch.ttsSettings ?? ttsSettings,
       personalNotes: patch.personalNotes ?? personalNotes,
       readingHistory: patch.readingHistory ?? readingHistory,
+      favorites: nextFavorites,
+      savedDocuments: nextDocs,
     });
     setSyncStatus(result.ok ? 'synced' : 'error');
   };
 
-  // Cập nhật vị trí đọc văn bản gần nhất & lịch sử đọc
+  // Cập nhật vị trí đọc văn bản gần nhất, tiến độ đọc & lịch sử đọc
   const handleUpdateReadingPosition = (
     docId: string,
     segmentIndex: number,
@@ -297,7 +387,20 @@ export default function App() {
     const doc = documents.find((d) => d.id === docId);
     if (!doc) return;
 
+    const nowIso = new Date().toISOString();
     const progressPercent = Math.round(((segmentIndex + 1) / Math.max(1, totalSegments)) * 100);
+    const nextProgressMap: Record<string, ReadingProgressMapItem> = {
+      ...readingProgressMap,
+      [docId]: {
+        documentId: docId,
+        segmentIndex,
+        totalSegments,
+        progressPercent,
+        updatedAt: nowIso,
+      },
+    };
+    setReadingProgressMap(nextProgressMap);
+
     setReadingHistory((prev) => {
       const existingIdx = prev.findIndex((item) => item.documentId === docId);
       const entry: ReadingHistoryItem = {
@@ -308,7 +411,7 @@ export default function App() {
         segmentIndex,
         totalSegments,
         progressPercent,
-        updatedAt: new Date().toISOString(),
+        updatedAt: nowIso,
       };
       const next =
         existingIdx >= 0
@@ -317,6 +420,7 @@ export default function App() {
       void persistUserWorkspace({
         lastDocumentId: docId,
         lastSegmentIndex: segmentIndex,
+        readingProgress: nextProgressMap,
         readingHistory: next,
       });
       return next;
@@ -399,12 +503,18 @@ export default function App() {
     setPlaylists((prev) => [newPl, ...prev]);
   };
 
-  // Quản lý Tài liệu Văn học
+  // Quản lý Tài liệu Văn học & Sách yêu thích (Tự động đồng bộ lên Supabase)
   const handleSaveDocument = async (doc: LiteratureDocument) => {
     await studioStorage.saveDocument(doc);
     setDocuments((prev) => {
       const exists = prev.some((d) => d.id === doc.id);
-      return exists ? prev.map((d) => (d.id === doc.id ? doc : d)) : [doc, ...prev];
+      const nextDocs = exists ? prev.map((d) => (d.id === doc.id ? doc : d)) : [doc, ...prev];
+      const nextFavs = nextDocs.filter((d) => d.isFavorite).map((d) => d.id);
+      void persistUserWorkspace({
+        favorites: nextFavs,
+        savedDocuments: nextDocs,
+      });
+      return nextDocs;
     });
     await refreshStorageStats();
   };
@@ -416,8 +526,13 @@ export default function App() {
     if (activeDocument?.id === id) {
       setActiveDocument(next[0] || null);
     }
+    const nextFavs = next.filter((d) => d.isFavorite).map((d) => d.id);
+    void persistUserWorkspace({
+      favorites: nextFavs,
+      savedDocuments: next,
+    });
     await refreshStorageStats();
-    showToast('Đã xóa tài liệu khỏi thư viện.');
+    showToast('Đã xóa tài liệu và đồng bộ lên Supabase.');
   };
 
   const handleSendDocumentToAi = async (
@@ -611,6 +726,17 @@ export default function App() {
                   </>
                 )}
               </div>
+
+              <a
+                href="/literature-studio-full.zip"
+                download="literature-studio-vietnamese-edition.zip"
+                data-testid="header-download-zip-btn"
+                title="Tải toàn bộ mã nguồn dự án (.ZIP)"
+                className="flex items-center gap-1.5 rounded-lg bg-[#36C98F]/15 border border-[#36C98F]/35 px-3 py-2 text-xs font-semibold text-[#36C98F] hover:bg-[#36C98F]/25 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <FolderArchive className="h-3.5 w-3.5" />
+                <span>Tải ZIP</span>
+              </a>
 
               <button
                 type="button"
