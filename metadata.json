@@ -1,0 +1,6 @@
+{
+  "name": "Literature Studio",
+  "description": "Nền tảng không gian làm việc tích hợp Âm nhạc, Văn học, Trợ lý AI Ngữ văn và Thuyết trình chuyên nghiệp.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
